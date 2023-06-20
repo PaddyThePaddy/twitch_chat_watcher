@@ -1,0 +1,26 @@
+[package]
+name = "twitch_chat_watcher"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+eframe = {version="0.22.0", features = ["persistence"]}
+env_logger = "0.10.0"
+log = "0.4.19"
+tokio = {version = "1.28.2", features = ["full"]}
+regex = "1.8.4"
+twitch-irc = "5.0.0"
+ron = "0.8.0"
+serde = { version = "1.0.164", features = ["derive"] }
+image = "0.24.6"
+chrono = "0.4.26"
+arboard = "3.2.0"
+lab = "0.11.0"
+cached = "0.44.0"
+rfd = "0.11.4"
+rodio = "0.17.1"
+
+[build-dependencies]
+embed-resource = "2.1.1"
