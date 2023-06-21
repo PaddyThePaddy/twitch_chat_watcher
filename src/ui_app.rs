@@ -717,7 +717,7 @@ impl EguiApp {
                     format!("https://www.twitch.tv/{}", msg.sender_login()),
                 );
                 ui.separator();
-                let mut drawed_badge = false;
+                let mut drew_badge = false;
                 for (badge_name, _) in msg.badges().iter() {
                     if badge_name == super::filter::BROADCASTER_BADGE_NAME {
                         ui.horizontal(|ui| {
@@ -728,7 +728,7 @@ impl EguiApp {
                             ui.image(texture, vec2(row_height, row_height));
                             ui.label("Broadcaster");
                         });
-                        drawed_badge = true;
+                        drew_badge = true;
                     }
                     if badge_name == super::filter::MODERATOR_BADGE_NAME {
                         ui.horizontal(|ui| {
@@ -739,7 +739,7 @@ impl EguiApp {
                             ui.image(texture, vec2(row_height, row_height));
                             ui.label("Moderator");
                         });
-                        drawed_badge = true;
+                        drew_badge = true;
                     }
                     if badge_name == super::filter::PARTNER_BADGE_NAME {
                         ui.horizontal(|ui| {
@@ -750,7 +750,7 @@ impl EguiApp {
                             ui.image(texture, vec2(row_height, row_height));
                             ui.label("Partner");
                         });
-                        drawed_badge = true;
+                        drew_badge = true;
                     }
                     if badge_name == super::filter::VIP_BADGE_NAME {
                         ui.horizontal(|ui| {
@@ -758,10 +758,10 @@ impl EguiApp {
                             ui.image(texture, vec2(row_height, row_height));
                             ui.label("VIP");
                         });
-                        drawed_badge = true;
+                        drew_badge = true;
                     }
                 }
-                if drawed_badge {
+                if drew_badge {
                     ui.separator();
                 }
                 if ui.button("Add user to filter").clicked() {
