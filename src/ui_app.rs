@@ -504,6 +504,10 @@ impl EguiApp {
                                 }
                             },
                         }
+
+                        if ui.button("Clear").clicked() {
+                            self.channel_list[self.selected_channel].clear_msg(filtered);
+                        }
                     });
                 });
                 ui.separator();
@@ -523,6 +527,7 @@ impl EguiApp {
 
                 ScrollArea::vertical()
                     .id_source(filtered)
+                    .enable_scrolling(self.show_msg_id.is_none() || filtered)
                     .auto_shrink([false; 2])
                     .stick_to_bottom(!home_pressed && self.show_msg_id.is_none())
                     .show(ui, |ui| {
@@ -531,18 +536,20 @@ impl EguiApp {
                         }
                         let client = &self.channel_list[self.selected_channel];
                         for msg in client.get_msg(filtered) {
-                            if let Some(id) = &self.show_msg_id {
-                                if id == msg.id() {
-                                    ui.scroll_to_cursor(Some(Align::Center));
-                                    ui.input(|i| {
-                                        if i.pointer.button_clicked(egui::PointerButton::Primary) {
-                                            self.show_msg_id = None;
-                                        }
-                                    });
+                            if !filtered {
+                                if let Some(id) = &self.show_msg_id {
+                                    if id == msg.id() {
+                                        ui.scroll_to_cursor(Some(Align::Center));
+                                    }
                                 }
                             }
                             self.draw_msg(ui, &msg, font_size);
                         }
+                        ui.input(|i| {
+                            if i.pointer.button_clicked(egui::PointerButton::Primary) {
+                                self.show_msg_id = None;
+                            }
+                        });
                         if end_pressed {
                             ui.scroll_to_cursor(None);
                         }

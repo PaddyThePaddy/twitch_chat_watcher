@@ -453,6 +453,16 @@ impl ChannelManager {
                 .await;
         });
     }
+
+    pub fn clear_msg(&mut self, filtered: bool) {
+        ASYNC_RUNTIME.block_on(async {
+            if filtered {
+                self.shared_data.lock().await.filtered_msg_list.clear();
+            } else {
+                self.shared_data.lock().await.msg_list.clear();
+            }
+        });
+    }
 }
 
 fn msg_to_str(msg: &TwitchMsg) -> String {
