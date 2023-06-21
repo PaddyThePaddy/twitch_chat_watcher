@@ -7,8 +7,7 @@ use eframe::{
 };
 use twitch_chat_watcher::{ui_app::*, APP_SAVE_STATE_KEY};
 
-#[tokio::main]
-async fn main() -> Result<(), eframe::Error> {
+fn main() -> Result<(), eframe::Error> {
     env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
 
     let options = eframe::NativeOptions {

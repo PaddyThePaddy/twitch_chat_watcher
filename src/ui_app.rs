@@ -1,12 +1,20 @@
-use crate::{audio_player::AlertPlayer, filter::Filter};
+use crate::{
+    audio_player::AlertPlayer,
+    chat_client::{self, IrcClient, TwitchMsg},
+    filter::Filter,
+};
 extern crate lab;
-use super::{chat_client::ChannelConnectionState, chat_client::ChatClient, filter::FilterState};
+use super::{
+    chat_client::ChannelConnectionState, chat_client::ChannelManager, filter::FilterState,
+    ASYNC_RUNTIME,
+};
 use arboard::Clipboard;
 use cached::proc_macro::cached;
 use eframe::{
     egui::{
-        self, Context, DragValue, FontFamily::*, FontId, Key, Label, Layout, Modifiers, Response,
-        RichText, ScrollArea, Slider, Style, TextEdit, TextFormat, TextStyle, Ui,
+        self, Context, DragValue, FontFamily::*, FontId, InnerResponse, Key, Label, Layout,
+        Modifiers, Response, RichText, ScrollArea, Sense, Slider, Style, TextEdit, TextFormat,
+        TextStyle, Ui,
     },
     emath::Align,
     epaint::{
@@ -14,12 +22,15 @@ use eframe::{
         vec2, Color32, TextureHandle, Vec2,
     },
 };
+use git_version::git_version;
 use lab::Lab;
 use regex::Regex;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf, time::Duration, vec};
-use twitch_irc::message::PrivmsgMessage;
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration, vec};
+
+const ANONYMOUS_USERNAME: &str = "justinfan123";
+const ANONYMOUS_PASSWORD: &str = "";
 
 pub enum AppState {
     Normal,
@@ -39,7 +50,8 @@ pub struct EguiApp {
     username: String,
     access_token: String,
     new_channel_name: String,
-    channel_list: Vec<ChatClient>,
+    irc_client: Arc<tokio::sync::Mutex<IrcClient>>,
+    channel_list: Vec<ChannelManager>,
     selected_channel: usize,
     def_filter: FilterState,
     error_msg: Option<String>,
@@ -53,6 +65,9 @@ pub struct EguiApp {
     log_btn: Option<(usize, bool)>,
     alert_volume: f32,
     alert_player: AlertPlayer,
+    new_msg: String,
+    credential_changed: bool,
+    show_msg_id: Option<String>,
 }
 
 impl Default for EguiApp {
@@ -75,22 +90,28 @@ impl Default for EguiApp {
             dark_theme: true,
             log_btn: None,
             alert_volume: 1.0,
-            alert_player: AlertPlayer::new(),
+            alert_player: AlertPlayer::default(),
+            irc_client: Arc::new(tokio::sync::Mutex::new(
+                ASYNC_RUNTIME
+                    .block_on(async {
+                        IrcClient::new(ANONYMOUS_USERNAME, ANONYMOUS_PASSWORD).await
+                    })
+                    .unwrap(),
+            )),
+            new_msg: String::new(),
+            credential_changed: false,
+            show_msg_id: None,
         }
     }
 }
 
 impl EguiApp {
     pub fn new_channel(&mut self, channel_name: &str, filter: Filter) {
-        let mut client = ChatClient::new(channel_name, 1000, filter);
-        match client.connect() {
-            Ok(_) => {
-                self.channel_list.push(client);
-                self.new_channel_name = "".to_owned();
-                self.error_msg = None;
-            }
-            Err(e) => self.error_msg = Some(format!("{}", e)),
-        }
+        let mut client = ChannelManager::new(self.irc_client.clone(), channel_name, 1000, filter);
+        client.connect();
+        self.channel_list.push(client);
+        self.new_channel_name = "".to_owned();
+        self.error_msg = None;
     }
 
     fn draw_config(&mut self, app_ui: &mut Ui, ctx: &Context) {
@@ -99,18 +120,33 @@ impl EguiApp {
             ui.set_width(available_width);
             ScrollArea::vertical().show(ui, |ui| {
                 ui.set_width(available_width);
+                ui.add_space(10.0);
                 if let Some(e) = &self.error_msg {
                     ui.label(RichText::new(e).color(Color32::RED));
                     ui.add_space(10.0);
                 }
-                //ui.group(|ui| {
-                //    let label = ui.label("Username: ");
-                //    ui.text_edit_singleline(&mut self.username)
-                //        .labelled_by(label.id);
-                //    let label = ui.label("Access token: ");
-                //    ui.text_edit_singleline(&mut self.access_token)
-                //        .labelled_by(label.id);
-                //});
+                ui.group(|ui| {
+                    //let label = ui.label("Username: ");
+                    //if ui
+                    //    .text_edit_singleline(&mut self.username)
+                    //    .labelled_by(label.id)
+                    //    .changed()
+                    //{
+                    //    self.credential_changed = true;
+                    //}
+                    let label = ui.label("Access token: ");
+                    if ui
+                        .add(
+                            TextEdit::singleline(&mut self.access_token)
+                                .hint_text("oauth:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+                        )
+                        .labelled_by(label.id)
+                        .changed()
+                    {
+                        self.credential_changed = true;
+                    };
+                    ui.hyperlink_to("Get access token from here", "https://twitchapps.com/tmi/");
+                });
                 ui.add_space(10.0);
                 ui.group(|ui| {
                     ui.label("Font size:");
@@ -141,6 +177,7 @@ impl EguiApp {
                     &mut self.readable_color_adjustment,
                     "Adjust twitch username color for readability",
                 );
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.label("Use dark theme");
                     if toggle_btn(ui, &mut self.dark_theme).clicked() {
@@ -167,6 +204,8 @@ impl EguiApp {
                 ui.add_space(10.0);
                 ui.label("Default filter configurations");
                 draw_filter_config(ui, &mut self.def_filter);
+                ui.add_space(10.0);
+                ui.label(format!("Version: {}", git_version!()));
             });
         });
     }
@@ -239,12 +278,7 @@ impl EguiApp {
                                 let mut switch = client.is_connected();
                                 if toggle_btn(sub_ui, &mut switch).changed() {
                                     if switch {
-                                        match client.connect() {
-                                            Ok(()) => {}
-                                            Err(e) => {
-                                                self.error_msg = Some(format!("{}", e));
-                                            }
-                                        }
+                                        client.connect()
                                     } else {
                                         client.disconnect();
                                     }
@@ -312,10 +346,8 @@ impl EguiApp {
         });
         if let Some(idx) = remove_channel {
             self.channel_list.remove(idx);
-            if self.selected_channel == idx {
-                if idx > 0 {
-                    self.selected_channel = idx - 1;
-                }
+            if self.selected_channel == idx && idx > 0 {
+                self.selected_channel = idx - 1;
             }
         }
     }
@@ -346,7 +378,7 @@ impl EguiApp {
         }
     }
 
-    pub fn channel_list_mut(&mut self) -> &mut [ChatClient] {
+    pub fn channel_list_mut(&mut self) -> &mut [ChannelManager] {
         &mut self.channel_list
     }
 
@@ -359,17 +391,21 @@ impl EguiApp {
         set_font_size(ctx, self.font_size);
         self.username = save_state.username.clone();
         self.access_token = save_state.access_token.clone();
+        if !self.access_token.is_empty() && self.re_login().is_err() {
+            self.error_msg = Some("Login to chat failed, using anonymous".to_string())
+        }
         self.channel_list = save_state
             .channels
             .iter()
             .map(|save| {
-                let mut client = ChatClient::new(
+                let mut client = ChannelManager::new(
+                    self.irc_client.clone(),
                     save.name.clone(),
                     super::MAX_MESSAGE_COUNT,
                     (&save.filter).try_into()?,
                 );
                 if save.enabled {
-                    client.connect().unwrap();
+                    client.connect();
                 }
                 if let Some(log_path) = &save.log_status {
                     client.set_log(Some(log_path.clone()));
@@ -382,7 +418,7 @@ impl EguiApp {
                 }
                 Ok(client)
             })
-            .collect::<Result<Vec<ChatClient>, regex::Error>>()?;
+            .collect::<Result<Vec<ChannelManager>, regex::Error>>()?;
         self.def_filter = save_state.def_filter.clone();
         self.show_sent_time = save_state.show_sent_time;
         self.use_twitch_color = save_state.use_twitch_color;
@@ -407,7 +443,13 @@ impl EguiApp {
         ui.group(|group_ui| {
             group_ui.vertical(|ui| {
                 ui.set_width(size.x);
-                ui.set_height(size.y);
+                let text_style = egui::TextStyle::Body;
+                let row_height = ui.text_style_height(&text_style);
+                if filtered {
+                    ui.set_height(size.y);
+                } else {
+                    ui.set_height(size.y - row_height - 20.0);
+                }
                 ui.horizontal(|ui| {
                     ui.label(if filtered {
                         "Filtered message"
@@ -427,10 +469,8 @@ impl EguiApp {
                                     != ChannelConnectionState::Joined
                                 {
                                     response.on_hover_text("Please enable the channel first.");
-                                } else {
-                                    if response.clicked() {
-                                        self.log_btn = Some((self.selected_channel, filtered));
-                                    }
+                                } else if response.clicked() {
+                                    self.log_btn = Some((self.selected_channel, filtered));
                                 }
                             }
                             Some(r) => match r {
@@ -484,19 +524,56 @@ impl EguiApp {
                 ScrollArea::vertical()
                     .id_source(filtered)
                     .auto_shrink([false; 2])
-                    .stick_to_bottom(!home_pressed)
+                    .stick_to_bottom(!home_pressed && self.show_msg_id.is_none())
                     .show(ui, |ui| {
                         if home_pressed {
                             ui.scroll_to_cursor(None);
                         }
                         let client = &self.channel_list[self.selected_channel];
                         for msg in client.get_msg(filtered) {
+                            if let Some(id) = &self.show_msg_id {
+                                if id == msg.id() {
+                                    ui.scroll_to_cursor(Some(Align::Center));
+                                    ui.input(|i| {
+                                        if i.pointer.button_clicked(egui::PointerButton::Primary) {
+                                            self.show_msg_id = None;
+                                        }
+                                    });
+                                }
+                            }
                             self.draw_msg(ui, &msg, font_size);
                         }
                         if end_pressed {
                             ui.scroll_to_cursor(None);
                         }
-                    })
+                    });
+                if !filtered {
+                    ui.separator();
+                    ui.add_space(1.0);
+                    ui.horizontal(|ui| {
+                        let mut edit =
+                            TextEdit::singleline(&mut self.new_msg).desired_width(f32::INFINITY);
+                        if !self.channel_list[self.selected_channel].is_connected() {
+                            edit = edit
+                                .interactive(false)
+                                .hint_text("Channel is not connected");
+                        }
+                        if self.access_token.is_empty() {
+                            edit = edit
+                                .interactive(false)
+                                .hint_text("Provide the access token to send message");
+                        }
+                        let response = ui.add(edit);
+                        if response.lost_focus() {
+                            ui.input_mut(|input| {
+                                if input.consume_key(Modifiers::default(), Key::Enter) {
+                                    self.channel_list[self.selected_channel]
+                                        .send_msg(self.new_msg.clone());
+                                }
+                            });
+                        }
+                    });
+                }
 
                 //area.show_rows(ui, row_height, num_rows, |ui, row_range| {
                 //    let client = &self.channel_list[self.selected_channel];
@@ -508,67 +585,71 @@ impl EguiApp {
         });
     }
 
-    fn draw_msg(&mut self, ui: &mut Ui, msg: &PrivmsgMessage, font_size: f32) {
+    fn draw_msg(&mut self, ui: &mut Ui, msg: &TwitchMsg, font_size: f32) -> InnerResponse<()> {
         let text_style = TextStyle::Body;
         let row_height = ui.text_style_height(&text_style) + 1.0;
+        let highlight = if let Some(id) = &self.show_msg_id {
+            id == msg.id()
+        } else {
+            false
+        };
+        let bg_color = if highlight {
+            Color32::BROWN
+        } else {
+            ui.visuals().panel_fill
+        };
+        let text_color = if self.readable_color_adjustment {
+            adjust_readable_color(ui.visuals().text_color(), bg_color)
+        } else {
+            ui.visuals().text_color()
+        };
         let mut color = if self.use_twitch_color {
-            msg.name_color
-                .map(|c| Color32::from_rgb(c.r, c.g, c.b))
+            msg.name_color()
+                .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
                 .unwrap_or(ui.style().visuals.warn_fg_color)
         } else {
             ui.style().visuals.warn_fg_color
         };
 
         if self.readable_color_adjustment {
-            color = adjust_readable_color(color, ui.visuals().panel_fill);
+            color = adjust_readable_color(color, bg_color);
         }
         if let Some(((reply_author_id, reply_author_name), reply_msg_body)) = msg
-            .source
-            .tags
-            .0
-            .get("reply-parent-user-login")
-            .map(|o| o.as_ref())
-            .flatten()
-            .zip(
-                msg.source
-                    .tags
-                    .0
-                    .get("reply-parent-display-name")
-                    .map(|o| o.as_ref())
-                    .flatten(),
-            )
-            .zip(
-                msg.source
-                    .tags
-                    .0
-                    .get("reply-parent-msg-body")
-                    .map(|o| o.as_ref())
-                    .flatten(),
-            )
+            .tag("reply-parent-user-login")
+            .zip(msg.tag("reply-parent-display-name"))
+            .zip(msg.tag("reply-parent-msg-body"))
         {
             ui.horizontal(|ui| {
-                ui.add(Label::new(
-                    RichText::new(format!(
-                        "╭{}: {}",
-                        match self.name_display {
-                            NameDisplay::Both =>
-                                format!("{}({})", reply_author_name, reply_author_id),
-                            NameDisplay::NickName => reply_author_name.clone(),
-                            NameDisplay::Id => reply_author_id.clone(),
-                        },
-                        reply_msg_body
-                    ))
-                    .size(self.font_size * 0.8),
-                ));
+                if ui
+                    .add(
+                        Label::new(
+                            RichText::new(format!(
+                                "╭{}: {}",
+                                match self.name_display {
+                                    NameDisplay::Both =>
+                                        format!("{}({})", reply_author_name, reply_author_id),
+                                    NameDisplay::NickName => reply_author_name.clone(),
+                                    NameDisplay::Id => reply_author_id.clone(),
+                                },
+                                reply_msg_body
+                            ))
+                            .size(self.font_size * 0.8),
+                        )
+                        .sense(Sense::click()),
+                    )
+                    .clicked()
+                {
+                    self.show_msg_id = msg.tag("reply-parent-msg-id").cloned();
+                }
             });
         }
-        ui.horizontal_wrapped(|ui| {
+        let main_space = ui.horizontal_wrapped(|ui| {
             if self.show_sent_time {
-                let local_time = msg.server_timestamp.with_timezone(&chrono::Local);
+                let local_time = msg.sent_time().unwrap().with_timezone(&chrono::Local);
                 ui.label(local_time.format("%H:%M:%S").to_string());
             }
-            for badge in msg.badges.iter() {
-                if badge.name == super::filter::BROADCASTER_BADGE_NAME {
+            for (badge_name, _) in msg.badges().iter() {
+                if badge_name == super::filter::BROADCASTER_BADGE_NAME {
                     ui.image(
                         self.textures
                             .get(super::filter::BROADCASTER_BADGE_NAME)
@@ -576,7 +657,7 @@ impl EguiApp {
                         vec2(row_height, row_height),
                     );
                 }
-                if badge.name == super::filter::MODERATOR_BADGE_NAME {
+                if badge_name == super::filter::MODERATOR_BADGE_NAME {
                     ui.image(
                         self.textures
                             .get(super::filter::MODERATOR_BADGE_NAME)
@@ -584,7 +665,7 @@ impl EguiApp {
                         vec2(row_height, row_height),
                     );
                 }
-                if badge.name == super::filter::PARTNER_BADGE_NAME {
+                if badge_name == super::filter::PARTNER_BADGE_NAME {
                     ui.image(
                         self.textures
                             .get(super::filter::PARTNER_BADGE_NAME)
@@ -592,7 +673,7 @@ impl EguiApp {
                         vec2(row_height, row_height),
                     );
                 }
-                if badge.name == super::filter::VIP_BADGE_NAME {
+                if badge_name == super::filter::VIP_BADGE_NAME {
                     ui.image(
                         self.textures.get(super::filter::VIP_BADGE_NAME).unwrap(),
                         vec2(row_height, row_height),
@@ -609,13 +690,14 @@ impl EguiApp {
             };
             let format: TextFormat = TextFormat {
                 font_id: FontId::new(font_size, Proportional),
-                color: ui.visuals().text_color(),
+                color: text_color,
+                background: bg_color,
                 ..Default::default()
             };
             let name = match self.name_display {
-                NameDisplay::Both => format!("{}({})", msg.sender.name, msg.sender.login),
-                NameDisplay::NickName => msg.sender.name.to_owned(),
-                NameDisplay::Id => msg.sender.login.to_owned(),
+                NameDisplay::Both => format!("{}({})", msg.sender_display(), msg.sender_login()),
+                NameDisplay::NickName => msg.sender_display().to_owned(),
+                NameDisplay::Id => msg.sender_login().to_owned(),
             };
             layout.append(
                 &name,
@@ -626,18 +708,18 @@ impl EguiApp {
                 },
             );
             layout.append(": ", 0.0, format.clone());
-            layout.append(msg.message_text.trim(), 0.0, format);
+            layout.append(msg.payload().trim(), 0.0, format);
 
             let response: Response = ui.label(layout).context_menu(|ui| {
                 ui.set_width(400.0);
                 ui.hyperlink_to(
-                    format!("{}({})", msg.sender.name, msg.sender.login),
-                    format!("https://www.twitch.tv/{}", msg.sender.login),
+                    format!("{}({})", msg.sender_display(), msg.sender_login()),
+                    format!("https://www.twitch.tv/{}", msg.sender_login()),
                 );
                 ui.separator();
                 let mut drawed_badge = false;
-                for badge in msg.badges.iter() {
-                    if badge.name == super::filter::BROADCASTER_BADGE_NAME {
+                for (badge_name, _) in msg.badges().iter() {
+                    if badge_name == super::filter::BROADCASTER_BADGE_NAME {
                         ui.horizontal(|ui| {
                             let texture = self
                                 .textures
@@ -648,7 +730,7 @@ impl EguiApp {
                         });
                         drawed_badge = true;
                     }
-                    if badge.name == super::filter::MODERATOR_BADGE_NAME {
+                    if badge_name == super::filter::MODERATOR_BADGE_NAME {
                         ui.horizontal(|ui| {
                             let texture = self
                                 .textures
@@ -659,7 +741,7 @@ impl EguiApp {
                         });
                         drawed_badge = true;
                     }
-                    if badge.name == super::filter::PARTNER_BADGE_NAME {
+                    if badge_name == super::filter::PARTNER_BADGE_NAME {
                         ui.horizontal(|ui| {
                             let texture = self
                                 .textures
@@ -670,7 +752,7 @@ impl EguiApp {
                         });
                         drawed_badge = true;
                     }
-                    if badge.name == super::filter::VIP_BADGE_NAME {
+                    if badge_name == super::filter::VIP_BADGE_NAME {
                         ui.horizontal(|ui| {
                             let texture = self.textures.get(super::filter::VIP_BADGE_NAME).unwrap();
                             ui.image(texture, vec2(row_height, row_height));
@@ -683,39 +765,34 @@ impl EguiApp {
                     ui.separator();
                 }
                 if ui.button("Add user to filter").clicked() {
-                    match Regex::new(&regex::escape(&msg.sender.login)) {
+                    match Regex::new(&regex::escape(msg.sender_login())) {
                         Ok(r) => self.channel_list[self.selected_channel]
                             .mut_filter(|f| f.add_author_pat(r)),
                         Err(e) => self.error_msg = Some(format!("{}", e)),
                     }
-                    dbg!("clicked");
                     ui.close_menu();
                 }
                 if ui.button("Add user to exclusive filter").clicked() {
-                    match Regex::new(&regex::escape(&msg.sender.login)) {
+                    match Regex::new(&regex::escape(msg.sender_login())) {
                         Ok(r) => self.channel_list[self.selected_channel]
                             .mut_filter(|f| f.add_exc_author_pat(r)),
                         Err(e) => self.error_msg = Some(format!("{}", e)),
                     }
-                    dbg!("clicked");
                     ui.close_menu();
                 }
                 if ui.button("Copy content").clicked() {
                     let mut clipboard = Clipboard::new().unwrap();
-                    clipboard.set_text(msg.message_text.trim()).unwrap();
-                    dbg!("clicked");
+                    clipboard.set_text(msg.payload().trim()).unwrap();
                     ui.close_menu();
                 }
                 if ui.button("Copy sender's nickname").clicked() {
                     let mut clipboard = Clipboard::new().unwrap();
-                    clipboard.set_text(&msg.sender.name).unwrap();
-                    dbg!("clicked");
+                    clipboard.set_text(msg.sender_display()).unwrap();
                     ui.close_menu();
                 }
                 if ui.button("Copy sender's id").clicked() {
                     let mut clipboard = Clipboard::new().unwrap();
-                    clipboard.set_text(&msg.sender.login).unwrap();
-                    dbg!("clicked");
+                    clipboard.set_text(msg.sender_login()).unwrap();
                     ui.close_menu();
                 }
             });
@@ -724,6 +801,28 @@ impl EguiApp {
             }
         });
         ui.separator();
+        main_space
+    }
+
+    fn re_login(&mut self) -> Result<(), ()> {
+        let new_client: IrcClient = ASYNC_RUNTIME.block_on(async {
+            if !self.access_token.is_empty() {
+                // seems twitch irc server doesn't care about username.
+                chat_client::IrcClient::new("a", &self.access_token).await
+            } else {
+                chat_client::IrcClient::new(ANONYMOUS_USERNAME, ANONYMOUS_PASSWORD).await
+            }
+        })?;
+        ASYNC_RUNTIME.block_on(async {
+            *self.irc_client.lock().await = new_client;
+        });
+
+        for channel in self.channel_list.iter_mut() {
+            if channel.is_connected() {
+                channel.connect();
+            }
+        }
+        Ok(())
     }
 }
 
@@ -753,11 +852,18 @@ impl eframe::App for EguiApp {
                     AppState::Normal => {
                         self.error_msg = None;
                         self.state = AppState::Config;
+                        self.credential_changed = false;
                     }
                     AppState::Config => {
-                        if let Err(e) = build_regexes(&self.def_filter.inc_author) {
+                        if self.credential_changed && self.re_login().is_err() {
+                            self.error_msg = Some("Login to chat failed".to_string());
+                        } else if let Err(e) = build_regexes(&self.def_filter.inc_author) {
                             self.error_msg = Some(format!("{}", e));
                         } else if let Err(e) = build_regexes(&self.def_filter.inc_msg) {
+                            self.error_msg = Some(format!("{}", e));
+                        } else if let Err(e) = build_regexes(&self.def_filter.exc_msg) {
+                            self.error_msg = Some(format!("{}", e));
+                        } else if let Err(e) = build_regexes(&self.def_filter.exc_author) {
                             self.error_msg = Some(format!("{}", e));
                         } else {
                             self.error_msg = None;
@@ -857,8 +963,8 @@ impl From<&EguiApp> for AppSaveState {
                     name: c.channel_name().to_owned(),
                     enabled: c.is_connected(),
                     filter: c.get_filter_state(),
-                    log_status: c.log_status().map(|r| r.ok()).flatten(),
-                    filtered_log_status: c.filtered_log_status().map(|r| r.ok()).flatten(),
+                    log_status: c.log_status().and_then(|r| r.ok()),
+                    filtered_log_status: c.filtered_log_status().and_then(|r| r.ok()),
                     bell: false,
                     alert: c.alert(),
                 })
@@ -938,7 +1044,7 @@ fn draw_filter_config(ui: &mut Ui, filter_state: &mut FilterState) {
 
 #[cached]
 fn adjust_readable_color(fg: Color32, bg: Color32) -> Color32 {
-    let mut color = fg.clone();
+    let mut color = fg;
     let bg_lab = Lab::from_rgb(&[bg.r(), bg.g(), bg.b()]);
     let mut fg_lab = Lab::from_rgb(&[fg.r(), fg.g(), fg.b()]);
     let l_delta = if bg_lab.l > fg_lab.l {

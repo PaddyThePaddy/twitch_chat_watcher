@@ -10,17 +10,17 @@ use std::{
 
 use rodio::{Decoder, OutputStream, Sink};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AlertPlayer {
     volume: Arc<Mutex<f32>>,
     _worker_handler: Arc<JoinHandle<()>>,
     tx: Sender<f32>,
 }
 
-unsafe impl std::marker::Send for AlertPlayer {}
+//unsafe impl std::marker::Send for AlertPlayer {}
 
-impl AlertPlayer {
-    pub fn new() -> AlertPlayer {
+impl Default for AlertPlayer {
+    fn default() -> Self {
         let (tx, rx) = channel();
         let worker = thread::spawn(move || {
             //Sound Effect by UNIVERSFIELD from Pixabay
@@ -44,7 +44,9 @@ impl AlertPlayer {
             tx,
         }
     }
+}
 
+impl AlertPlayer {
     pub fn play(&self) -> Result<(), SendError<f32>> {
         self.tx.send(*self.volume.lock().unwrap())
     }

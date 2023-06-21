@@ -1,6 +1,7 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use twitch_irc::message::PrivmsgMessage;
+
+use crate::chat_client::TwitchMsg;
 
 pub const BROADCASTER_BADGE_NAME: &str = "broadcaster";
 pub const MODERATOR_BADGE_NAME: &str = "moderator";
@@ -40,7 +41,7 @@ impl std::convert::From<&Filter> for FilterState {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct Filter {
     inc_msg_pat: Vec<Regex>,
     inc_author_pat: Vec<Regex>,
@@ -134,33 +135,33 @@ impl Filter {
         self.exc_author_pat.push(pat);
     }
 
-    pub fn test(&self, msg: &PrivmsgMessage) -> bool {
+    pub fn test(&self, msg: &TwitchMsg) -> bool {
         for pat in self.exc_msg_pat.iter() {
-            if pat.is_match(&msg.message_text) {
+            if pat.is_match(msg.payload()) {
                 return false;
             }
         }
 
         for pat in self.exc_author_pat.iter() {
-            if pat.is_match(&msg.sender.login) {
+            if pat.is_match(msg.sender_login()) {
                 return false;
             }
         }
 
         for pat in self.inc_msg_pat.iter() {
-            if pat.is_match(&msg.message_text) {
+            if pat.is_match(msg.payload()) {
                 return true;
             }
         }
 
         for pat in self.inc_author_pat.iter() {
-            if pat.is_match(&msg.sender.login) {
+            if pat.is_match(msg.sender_login()) {
                 return true;
             }
         }
-        for badge in msg.badges.iter() {
+        for (badge, _) in msg.badges().iter() {
             for target in self.badge_pat.iter() {
-                if &badge.name == target {
+                if badge == target {
                     return true;
                 }
             }
