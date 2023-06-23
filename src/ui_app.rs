@@ -470,6 +470,7 @@ impl EguiApp {
                                 }
                             });
 
+                            let mut highlight_message_found = false;
                             ScrollArea::vertical()
                                 .id_source(filtered)
                                 //.auto_shrink([false, false])
@@ -486,6 +487,7 @@ impl EguiApp {
                                             if let Some(id) = &self.show_msg_id {
                                                 if id == msg.id() {
                                                     ui.scroll_to_cursor(Some(Align::Center));
+                                                    highlight_message_found = true;
                                                 }
                                             }
                                         }
@@ -500,6 +502,9 @@ impl EguiApp {
                                         ui.scroll_to_cursor(None);
                                     }
                                 });
+                            if !highlight_message_found {
+                                self.show_msg_id = None;
+                            }
                         });
                     });
 
