@@ -8,7 +8,7 @@ pub const MODERATOR_BADGE_NAME: &str = "moderator";
 pub const VIP_BADGE_NAME: &str = "vip";
 pub const PARTNER_BADGE_NAME: &str = "partner";
 
-#[derive(Clone, Deserialize, Serialize, Default)]
+#[derive(Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct FilterState {
     pub inc_msg: String,
     pub inc_author: String,

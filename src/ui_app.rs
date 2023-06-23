@@ -32,9 +32,11 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration, vec};
 const ANONYMOUS_USERNAME: &str = "justinfan123";
 const ANONYMOUS_PASSWORD: &str = "";
 
+#[derive(PartialEq)]
 pub enum AppState {
     Normal,
     Config,
+    ChannelList,
     ChannelConfig(usize, FilterState),
 }
 
@@ -212,143 +214,45 @@ impl EguiApp {
 
     fn draw_normal(&mut self, app_ui: &mut Ui) {
         let main_area_available_size = app_ui.available_size();
-        let mut remove_channel = None;
-        let uninitialized_color = if self.readable_color_adjustment {
-            adjust_readable_color(Color32::GRAY, app_ui.visuals().panel_fill)
-        } else {
-            Color32::GRAY
-        };
-        let joined_color = if self.readable_color_adjustment {
-            adjust_readable_color(Color32::GREEN, app_ui.visuals().panel_fill)
-        } else {
-            Color32::GREEN
-        };
-        let logging_color = if self.readable_color_adjustment {
-            adjust_readable_color(Color32::BLUE, app_ui.visuals().panel_fill)
-        } else {
-            Color32::BLUE
-        };
-
-        app_ui.horizontal(|main_area_ui| {
-            main_area_ui.vertical(|channel_list_ui| {
-                channel_list_ui.set_height(main_area_available_size.y);
-                channel_list_ui.set_width(300.0);
-                ScrollArea::vertical().show(channel_list_ui, |channel_list_ui| {
-                    for (idx, client) in self.channel_list.iter_mut().enumerate() {
-                        channel_list_ui.horizontal(|channel_ui| {
-                            channel_ui
-                                .radio_value(
-                                    &mut self.selected_channel,
-                                    idx,
-                                    RichText::new(client.channel_name()).color(
-                                        match client.state() {
-                                            ChannelConnectionState::Uninitialized => {
-                                                uninitialized_color
-                                            }
-                                            ChannelConnectionState::Joined => {
-                                                if client.log_status().is_some()
-                                                    || client.filtered_log_status().is_some()
-                                                {
-                                                    logging_color
-                                                } else {
-                                                    joined_color
-                                                }
-                                            }
-                                        },
-                                    ),
-                                )
-                                .context_menu(|ui| {
-                                    ui.hyperlink_to(
-                                        "Twitch page",
-                                        format!("https://www.twitch.tv/{}", client.channel_name()),
-                                    );
-                                    ui.separator();
-                                    if ui.button("Configuration").clicked() {
-                                        self.state =
-                                            AppState::ChannelConfig(idx, client.get_filter_state());
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Delete").clicked() {
-                                        remove_channel = Some(idx);
-                                        ui.close_menu();
-                                    }
-                                });
-
-                            channel_ui.with_layout(Layout::right_to_left(Align::RIGHT), |sub_ui| {
-                                let mut switch = client.is_connected();
-                                if toggle_btn(sub_ui, &mut switch).changed() {
-                                    if switch {
-                                        client.connect()
-                                    } else {
-                                        client.disconnect();
-                                    }
-                                }
-                                if client.has_unread_filtered_msg() {
-                                    sub_ui.label(
-                                        RichText::new("!")
-                                            .color(sub_ui.style().visuals.warn_fg_color),
-                                    );
-                                }
-                                sub_ui.label(format!(
-                                    "{} / {}",
-                                    client.get_msg_count(false),
-                                    client.get_msg_count(true)
-                                ));
-                            });
-                        });
-
-                        channel_list_ui.separator();
-                    }
-                    channel_list_ui.add_space(5.0);
-                    channel_list_ui.horizontal(|new_channel_ui| {
-                        let response =
-                            new_channel_ui.text_edit_singleline(&mut self.new_channel_name);
-                        if response.lost_focus() {
-                            new_channel_ui.input_mut(|input| {
-                                if input.consume_key(Modifiers::default(), Key::Enter) {
-                                    self.new_channel(
-                                        &self.new_channel_name.clone(),
-                                        (&self.def_filter).try_into().unwrap(),
-                                    );
-                                }
-                            });
-                        }
-                        if new_channel_ui.button("+").clicked() {
-                            self.new_channel(
-                                &self.new_channel_name.clone(),
-                                (&self.def_filter).try_into().unwrap(),
-                            );
-                        }
-                    });
-                    if let Some(err) = &self.error_msg {
-                        channel_list_ui.label(RichText::new(err).color(Color32::RED));
-                    }
-                });
-            });
-            main_area_ui.separator();
-            let available_width = main_area_ui.available_width() - 50.0;
-            if !self.channel_list.is_empty() {
+        //eprintln!("1 {:?}", main_area_available_size);
+        if main_area_available_size.y / main_area_available_size.x > 0.9 {
+            app_ui.vertical(|ui| {
+                //ui.add_space(main_area_available_size.y / 2.0);
                 self.draw_chat(
-                    main_area_ui,
-                    vec2(available_width / 2.0, main_area_available_size.y),
-                    false,
-                    self.font_size,
-                );
-                main_area_ui.separator();
-                self.draw_chat(
-                    main_area_ui,
-                    vec2(available_width / 2.0, main_area_available_size.y),
+                    ui,
+                    vec2(main_area_available_size.x, main_area_available_size.y / 2.0),
                     true,
                     self.font_size,
                 );
-                self.channel_list[self.selected_channel].read();
-            }
-        });
-        if let Some(idx) = remove_channel {
-            self.channel_list.remove(idx);
-            if self.selected_channel == idx && idx > 0 {
-                self.selected_channel = idx - 1;
-            }
+                self.draw_chat(
+                    ui,
+                    vec2(main_area_available_size.x, main_area_available_size.y / 2.0),
+                    false,
+                    self.font_size,
+                );
+            });
+        } else {
+            app_ui.horizontal(|main_area_ui| {
+                self.draw_channel_list(main_area_ui, vec2(300.0, main_area_available_size.y));
+                main_area_ui.separator();
+                let available_width = main_area_ui.available_width() - 50.0;
+                if !self.channel_list.is_empty() {
+                    self.draw_chat(
+                        main_area_ui,
+                        vec2(available_width / 2.0, main_area_available_size.y),
+                        false,
+                        self.font_size,
+                    );
+                    main_area_ui.separator();
+                    self.draw_chat(
+                        main_area_ui,
+                        vec2(available_width / 2.0, main_area_available_size.y),
+                        true,
+                        self.font_size,
+                    );
+                    self.channel_list[self.selected_channel].read();
+                }
+            });
         }
     }
 
@@ -440,154 +344,172 @@ impl EguiApp {
     }
 
     fn draw_chat(&mut self, ui: &mut Ui, size: Vec2, filtered: bool, font_size: f32) {
-        ui.group(|group_ui| {
-            group_ui.vertical(|ui| {
-                ui.set_width(size.x);
-                let text_style = egui::TextStyle::Body;
-                let row_height = ui.text_style_height(&text_style);
-                if filtered {
-                    ui.set_height(size.y);
-                } else {
-                    ui.set_height(size.y - row_height - 20.0);
-                }
-                ui.horizontal(|ui| {
-                    ui.label(if filtered {
-                        "Filtered message"
-                    } else {
-                        "All message"
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let log_status = if filtered {
-                            self.channel_list[self.selected_channel].filtered_log_status()
-                        } else {
-                            self.channel_list[self.selected_channel].log_status()
-                        };
-                        match log_status {
-                            None => {
-                                let response = ui.button("Log");
-                                if self.channel_list[self.selected_channel].state()
-                                    != ChannelConnectionState::Joined
-                                {
-                                    response.on_hover_text("Please enable the channel first.");
-                                } else if response.clicked() {
-                                    self.log_btn = Some((self.selected_channel, filtered));
-                                }
+        ui.vertical(|ui| {
+            ui.set_max_height(size.y);
+            ui.set_max_width(size.x);
+            ui.group(|group_ui| {
+                group_ui.vertical(|ui| {
+                    //if filtered {
+                    //    ui.set_height(size.y);
+                    //} else {
+                    //    ui.set_height(size.y - row_height - 20.0);
+                    //}
+                    ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                        if !filtered {
+                            let mut edit = TextEdit::singleline(&mut self.new_msg)
+                                .desired_width(f32::INFINITY)
+                                .margin(vec2(0.0, 0.0))
+                                .frame(true);
+                            if !self.channel_list[self.selected_channel].is_connected() {
+                                edit = edit
+                                    .interactive(false)
+                                    .hint_text("Channel is not connected");
                             }
-                            Some(r) => match r {
-                                Err(e) => {
-                                    if ui
-                                        .button(RichText::new("Stop").color(Color32::RED))
-                                        .on_hover_text(e)
-                                        .clicked()
-                                    {
-                                        if filtered {
-                                            self.channel_list[self.selected_channel]
-                                                .set_filtered_log(None);
-                                        } else {
-                                            self.channel_list[self.selected_channel].set_log(None);
+                            if self.access_token.is_empty() {
+                                edit = edit
+                                    .interactive(false)
+                                    .hint_text("Provide the access token to send message");
+                            }
+                            let response = ui.add(edit);
+                            if response.lost_focus() {
+                                ui.input_mut(|input| {
+                                    if input.consume_key(Modifiers::default(), Key::Enter) {
+                                        self.channel_list[self.selected_channel]
+                                            .send_msg(self.new_msg.clone());
+                                        self.new_msg = String::new();
+                                    }
+                                });
+                            }
+                            ui.add_space(1.0);
+                            ui.separator();
+                        }
+                        ui.with_layout(Layout::top_down(Align::Center), |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(if filtered {
+                                    "Filtered message"
+                                } else {
+                                    "All message"
+                                });
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    let log_status = if filtered {
+                                        self.channel_list[self.selected_channel]
+                                            .filtered_log_status()
+                                    } else {
+                                        self.channel_list[self.selected_channel].log_status()
+                                    };
+                                    match log_status {
+                                        None => {
+                                            let response = ui.button("Log");
+                                            if self.channel_list[self.selected_channel].state()
+                                                != ChannelConnectionState::Joined
+                                            {
+                                                response.on_hover_text(
+                                                    "Please enable the channel first.",
+                                                );
+                                            } else if response.clicked() {
+                                                self.log_btn =
+                                                    Some((self.selected_channel, filtered));
+                                            }
                                         }
+                                        Some(r) => match r {
+                                            Err(e) => {
+                                                if ui
+                                                    .button(
+                                                        RichText::new("Stop").color(Color32::RED),
+                                                    )
+                                                    .on_hover_text(e)
+                                                    .clicked()
+                                                {
+                                                    if filtered {
+                                                        self.channel_list[self.selected_channel]
+                                                            .set_filtered_log(None);
+                                                    } else {
+                                                        self.channel_list[self.selected_channel]
+                                                            .set_log(None);
+                                                    }
+                                                }
+                                            }
+                                            Ok(p) => {
+                                                if ui
+                                                    .button(
+                                                        RichText::new("Stop").color(Color32::GREEN),
+                                                    )
+                                                    .on_hover_text(format!("{}", p.display()))
+                                                    .clicked()
+                                                {
+                                                    if filtered {
+                                                        self.channel_list[self.selected_channel]
+                                                            .set_filtered_log(None);
+                                                    } else {
+                                                        self.channel_list[self.selected_channel]
+                                                            .set_log(None);
+                                                    }
+                                                }
+                                            }
+                                        },
                                     }
-                                }
-                                Ok(p) => {
-                                    if ui
-                                        .button(RichText::new("Stop").color(Color32::GREEN))
-                                        .on_hover_text(format!("{}", p.display()))
-                                        .clicked()
-                                    {
-                                        if filtered {
-                                            self.channel_list[self.selected_channel]
-                                                .set_filtered_log(None);
-                                        } else {
-                                            self.channel_list[self.selected_channel].set_log(None);
-                                        }
+
+                                    if ui.button("Clear").clicked() {
+                                        self.channel_list[self.selected_channel]
+                                            .clear_msg(filtered);
                                     }
-                                }
-                            },
-                        }
+                                });
+                            });
+                            ui.separator();
+                            let mut end_pressed = false;
+                            let mut home_pressed = false;
 
-                        if ui.button("Clear").clicked() {
-                            self.channel_list[self.selected_channel].clear_msg(filtered);
-                        }
-                    });
-                });
-                ui.separator();
-                let mut end_pressed = false;
-                let mut home_pressed = false;
-
-                ui.input_mut(|input| {
-                    if input.focused {
-                        if input.consume_key(Modifiers::default(), Key::End) {
-                            end_pressed = true;
-                        }
-                        if input.consume_key(Modifiers::default(), Key::Home) {
-                            home_pressed = true;
-                        }
-                    }
-                });
-
-                ScrollArea::vertical()
-                    .id_source(filtered)
-                    .enable_scrolling(self.show_msg_id.is_none() || filtered)
-                    .auto_shrink([false; 2])
-                    .stick_to_bottom(!home_pressed && self.show_msg_id.is_none())
-                    .show(ui, |ui| {
-                        if home_pressed {
-                            ui.scroll_to_cursor(None);
-                        }
-                        let client = &self.channel_list[self.selected_channel];
-                        for msg in client.get_msg(filtered) {
-                            if !filtered {
-                                if let Some(id) = &self.show_msg_id {
-                                    if id == msg.id() {
-                                        ui.scroll_to_cursor(Some(Align::Center));
-                                    }
-                                }
-                            }
-                            self.draw_msg(ui, &msg, font_size);
-                        }
-                        ui.input(|i| {
-                            if i.pointer.button_clicked(egui::PointerButton::Primary) {
-                                self.show_msg_id = None;
-                            }
-                        });
-                        if end_pressed {
-                            ui.scroll_to_cursor(None);
-                        }
-                    });
-                if !filtered {
-                    ui.separator();
-                    ui.add_space(1.0);
-                    ui.horizontal(|ui| {
-                        let mut edit =
-                            TextEdit::singleline(&mut self.new_msg).desired_width(f32::INFINITY);
-                        if !self.channel_list[self.selected_channel].is_connected() {
-                            edit = edit
-                                .interactive(false)
-                                .hint_text("Channel is not connected");
-                        }
-                        if self.access_token.is_empty() {
-                            edit = edit
-                                .interactive(false)
-                                .hint_text("Provide the access token to send message");
-                        }
-                        let response = ui.add(edit);
-                        if response.lost_focus() {
                             ui.input_mut(|input| {
-                                if input.consume_key(Modifiers::default(), Key::Enter) {
-                                    self.channel_list[self.selected_channel]
-                                        .send_msg(self.new_msg.clone());
+                                if input.focused {
+                                    if input.consume_key(Modifiers::default(), Key::End) {
+                                        end_pressed = true;
+                                    }
+                                    if input.consume_key(Modifiers::default(), Key::Home) {
+                                        home_pressed = true;
+                                    }
                                 }
                             });
-                        }
-                    });
-                }
 
-                //area.show_rows(ui, row_height, num_rows, |ui, row_range| {
-                //    let client = &self.channel_list[self.selected_channel];
-                //    for msg in client.get_n_msg(row_range, filtered) {
-                //        self.draw_msg(ui, &msg, font_size);
-                //    }
-                //});
+                            ScrollArea::vertical()
+                                .id_source(filtered)
+                                //.auto_shrink([false, false])
+                                .enable_scrolling(self.show_msg_id.is_none() || filtered)
+                                //.auto_shrink([false; 2])
+                                .stick_to_bottom(!home_pressed && self.show_msg_id.is_none())
+                                .show(ui, |ui| {
+                                    if home_pressed {
+                                        ui.scroll_to_cursor(None);
+                                    }
+                                    let client = &self.channel_list[self.selected_channel];
+                                    for msg in client.get_msg(filtered) {
+                                        if !filtered {
+                                            if let Some(id) = &self.show_msg_id {
+                                                if id == msg.id() {
+                                                    ui.scroll_to_cursor(Some(Align::Center));
+                                                }
+                                            }
+                                        }
+                                        self.draw_msg(ui, &msg, font_size);
+                                    }
+                                    ui.input(|i| {
+                                        if i.pointer.button_clicked(egui::PointerButton::Primary) {
+                                            self.show_msg_id = None;
+                                        }
+                                    });
+                                    if end_pressed {
+                                        ui.scroll_to_cursor(None);
+                                    }
+                                });
+                        });
+                    });
+
+                    //area.show_rows(ui, row_height, num_rows, |ui, row_range| {
+                    //    let client = &self.channel_list[self.selected_channel];
+                    //    for msg in client.get_n_msg(row_range, filtered) {
+                    //        self.draw_msg(ui, &msg, font_size);
+                    //    }
+                    //});
+                });
             });
         });
     }
@@ -811,6 +733,121 @@ impl EguiApp {
         main_space
     }
 
+    fn draw_channel_list(&mut self, ui: &mut Ui, size: Vec2) {
+        let mut remove_channel = None;
+        let uninitialized_color = if self.readable_color_adjustment {
+            adjust_readable_color(Color32::GRAY, ui.visuals().panel_fill)
+        } else {
+            Color32::GRAY
+        };
+        let joined_color = if self.readable_color_adjustment {
+            adjust_readable_color(Color32::GREEN, ui.visuals().panel_fill)
+        } else {
+            Color32::GREEN
+        };
+        let logging_color = if self.readable_color_adjustment {
+            adjust_readable_color(Color32::BLUE, ui.visuals().panel_fill)
+        } else {
+            Color32::BLUE
+        };
+
+        ui.vertical(|channel_list_ui| {
+            channel_list_ui.set_height(size.y);
+            channel_list_ui.set_width(size.x);
+            ScrollArea::vertical().show(channel_list_ui, |channel_list_ui| {
+                for (idx, client) in self.channel_list.iter_mut().enumerate() {
+                    channel_list_ui.horizontal(|channel_ui| {
+                        channel_ui
+                            .radio_value(
+                                &mut self.selected_channel,
+                                idx,
+                                RichText::new(client.channel_name()).color(match client.state() {
+                                    ChannelConnectionState::Uninitialized => uninitialized_color,
+                                    ChannelConnectionState::Joined => {
+                                        if client.log_status().is_some()
+                                            || client.filtered_log_status().is_some()
+                                        {
+                                            logging_color
+                                        } else {
+                                            joined_color
+                                        }
+                                    }
+                                }),
+                            )
+                            .context_menu(|ui| {
+                                ui.hyperlink_to(
+                                    "Twitch page",
+                                    format!("https://www.twitch.tv/{}", client.channel_name()),
+                                );
+                                ui.separator();
+                                if ui.button("Configuration").clicked() {
+                                    self.state =
+                                        AppState::ChannelConfig(idx, client.get_filter_state());
+                                    ui.close_menu();
+                                }
+                                if ui.button("Delete").clicked() {
+                                    remove_channel = Some(idx);
+                                    ui.close_menu();
+                                }
+                            });
+
+                        channel_ui.with_layout(Layout::right_to_left(Align::RIGHT), |sub_ui| {
+                            let mut switch = client.is_connected();
+                            if toggle_btn(sub_ui, &mut switch).changed() {
+                                if switch {
+                                    client.connect()
+                                } else {
+                                    client.disconnect();
+                                }
+                            }
+                            if client.has_unread_filtered_msg() {
+                                sub_ui.label(
+                                    RichText::new("!").color(sub_ui.style().visuals.warn_fg_color),
+                                );
+                            }
+                            sub_ui.label(format!(
+                                "{} / {}",
+                                client.get_msg_count(false),
+                                client.get_msg_count(true)
+                            ));
+                        });
+                    });
+
+                    channel_list_ui.separator();
+                }
+                channel_list_ui.add_space(5.0);
+                channel_list_ui.horizontal(|new_channel_ui| {
+                    let response = new_channel_ui.text_edit_singleline(&mut self.new_channel_name);
+                    if response.lost_focus() {
+                        new_channel_ui.input_mut(|input| {
+                            if input.consume_key(Modifiers::default(), Key::Enter) {
+                                self.new_channel(
+                                    &self.new_channel_name.clone(),
+                                    (&self.def_filter).try_into().unwrap(),
+                                );
+                            }
+                        });
+                    }
+                    if new_channel_ui.button("+").clicked() {
+                        self.new_channel(
+                            &self.new_channel_name.clone(),
+                            (&self.def_filter).try_into().unwrap(),
+                        );
+                    }
+                });
+                if let Some(err) = &self.error_msg {
+                    channel_list_ui.label(RichText::new(err).color(Color32::RED));
+                }
+            });
+        });
+        if let Some(idx) = remove_channel {
+            self.channel_list.remove(idx);
+            if self.selected_channel == idx && idx > 0 {
+                self.selected_channel = idx - 1;
+            }
+        }
+    }
+
     fn re_login(&mut self) -> Result<(), ()> {
         let new_client: IrcClient = ASYNC_RUNTIME.block_on(async {
             if !self.access_token.is_empty() {
@@ -847,38 +884,11 @@ impl eframe::App for EguiApp {
         }
         ctx.request_repaint_after(Duration::from_secs(1));
         egui::CentralPanel::default().show(ctx, |app_ui| {
-            if app_ui
-                .button(match self.state {
-                    AppState::Normal => "Configuration",
-                    AppState::Config => "Back",
-                    AppState::ChannelConfig(_, _) => "Save",
-                })
-                .clicked()
-            {
-                match &self.state {
-                    AppState::Normal => {
-                        self.error_msg = None;
-                        self.state = AppState::Config;
-                        self.credential_changed = false;
-                    }
-                    AppState::Config => {
-                        if self.credential_changed && self.re_login().is_err() {
-                            self.error_msg = Some("Login to chat failed".to_string());
-                        } else if let Err(e) = build_regexes(&self.def_filter.inc_author) {
-                            self.error_msg = Some(format!("{}", e));
-                        } else if let Err(e) = build_regexes(&self.def_filter.inc_msg) {
-                            self.error_msg = Some(format!("{}", e));
-                        } else if let Err(e) = build_regexes(&self.def_filter.exc_msg) {
-                            self.error_msg = Some(format!("{}", e));
-                        } else if let Err(e) = build_regexes(&self.def_filter.exc_author) {
-                            self.error_msg = Some(format!("{}", e));
-                        } else {
-                            self.error_msg = None;
-                            self.state = AppState::Normal;
-                        }
-                    }
-                    AppState::ChannelConfig(idx, state) => {
-                        match self.channel_list[*idx].set_filter(state) {
+            let compact_mode = app_ui.available_height() / app_ui.available_width() > 0.9;
+            app_ui.horizontal(|ui| {
+                if let AppState::ChannelConfig(idx, filter_state) = &self.state {
+                    if ui.button("Back").clicked() {
+                        match self.channel_list[*idx].set_filter(filter_state) {
                             Ok(_) => {
                                 self.error_msg = None;
                                 self.state = AppState::Normal;
@@ -887,12 +897,54 @@ impl eframe::App for EguiApp {
                         }
                     }
                 }
-            }
+                if ui
+                    .selectable_label(self.state == AppState::Config, "Configuration")
+                    .clicked()
+                {
+                    match &self.state {
+                        AppState::Config => {
+                            if self.credential_changed && self.re_login().is_err() {
+                                self.error_msg = Some("Login to chat failed".to_string());
+                            } else if let Err(e) = build_regexes(&self.def_filter.inc_author) {
+                                self.error_msg = Some(format!("{}", e));
+                            } else if let Err(e) = build_regexes(&self.def_filter.inc_msg) {
+                                self.error_msg = Some(format!("{}", e));
+                            } else if let Err(e) = build_regexes(&self.def_filter.exc_msg) {
+                                self.error_msg = Some(format!("{}", e));
+                            } else if let Err(e) = build_regexes(&self.def_filter.exc_author) {
+                                self.error_msg = Some(format!("{}", e));
+                            } else {
+                                self.error_msg = None;
+                                self.state = AppState::Normal;
+                            }
+                        }
+                        _ => {
+                            self.error_msg = None;
+                            self.state = AppState::Config;
+                            self.credential_changed = false;
+                        }
+                    }
+                }
+
+                if compact_mode {
+                    if ui
+                        .selectable_label(self.state == AppState::ChannelList, "Channel list")
+                        .clicked()
+                    {
+                        if self.state != AppState::ChannelList {
+                            self.state = AppState::ChannelList;
+                        } else {
+                            self.state = AppState::Normal;
+                        }
+                    }
+                }
+            });
             app_ui.separator();
             match &mut self.state {
                 AppState::Normal => self.draw_normal(app_ui),
                 AppState::Config => self.draw_config(app_ui, ctx),
                 AppState::ChannelConfig(_, _) => self.draw_channel_config(app_ui),
+                AppState::ChannelList => self.draw_channel_list(app_ui, app_ui.available_size()),
             }
         });
     }
