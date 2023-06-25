@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 use eframe::{
-    egui::{FontData, FontDefinitions, TextureOptions},
-    epaint::{ColorImage, FontFamily},
+    egui::TextureOptions,
+    epaint::ColorImage,
     //Theme,
 };
 use twitch_chat_watcher::{ui_app::*, APP_SAVE_STATE_KEY};
@@ -19,34 +19,7 @@ fn main() -> Result<(), eframe::Error> {
         "Twitch chat watcher",
         options,
         Box::new(|cc: &eframe::CreationContext<'_>| {
-            let mut fonts = FontDefinitions::default();
-            //fonts.font_data.insert(
-            //    "Iansui-Regular".to_owned(),
-            //    FontData::from_static(include_bytes!("../fonts/Iansui-Regular.ttf")),
-            //);
-            //fonts.font_data.insert(
-            //    "NotoTc".to_owned(),
-            //    FontData::from_static(include_bytes!("../fonts/NotoSansTC-Regular.otf")),
-            //);
-            //fonts.font_data.insert(
-            //    "NotoSc".to_owned(),
-            //    FontData::from_static(include_bytes!("../fonts/NotoSansSC-Regular.otf")),
-            //);
-            fonts.font_data.insert(
-                "NotoMerged".to_owned(),
-                FontData::from_static(include_bytes!("../fonts/NotoSansMerged-Regular.otf")),
-            );
-            fonts
-                .families
-                .get_mut(&FontFamily::Proportional)
-                .unwrap()
-                .insert(0, "NotoMerged".to_owned());
-            //fonts
-            //    .families
-            //    .get_mut(&FontFamily::Monospace)
-            //    .unwrap()
-            //    .push("Iansui-Regular".to_owned());
-            cc.egui_ctx.set_fonts(fonts);
+            set_font(&cc.egui_ctx, None);
 
             set_font_size(&cc.egui_ctx, twitch_chat_watcher::DEFAULT_FONT_SIZE);
 

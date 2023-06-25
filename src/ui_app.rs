@@ -12,18 +12,21 @@ use arboard::Clipboard;
 use cached::proc_macro::cached;
 use eframe::{
     egui::{
-        self, Context, DragValue, FontFamily::*, FontId, InnerResponse, Key, Label, Layout,
-        Modifiers, Response, RichText, ScrollArea, Sense, Slider, Style, TextEdit, TextFormat,
-        TextStyle, Ui,
+        self, ComboBox, Context, DragValue, FontData, FontDefinitions, FontFamily::*, FontId,
+        InnerResponse, Key, Label, Layout, Modifiers, Response, RichText, ScrollArea, Sense,
+        Slider, Style, TextEdit, TextFormat, TextStyle, Ui,
     },
     emath::Align,
     epaint::{
+        pos2,
         text::{LayoutJob, TextWrapping},
-        vec2, Color32, TextureHandle, Vec2,
+        vec2, Color32, FontFamily, Rect, Stroke, TextureHandle, Vec2,
     },
 };
+use font_loader::system_fonts;
 use git_version::git_version;
 use lab::Lab;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
@@ -31,6 +34,12 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration, vec};
 
 const ANONYMOUS_USERNAME: &str = "justinfan123";
 const ANONYMOUS_PASSWORD: &str = "";
+static FONT_LIST: Lazy<Vec<String>> = Lazy::new(|| {
+    let mut v = vec!["".to_owned()];
+    v.extend(system_fonts::query_all().into_iter());
+    v.sort();
+    v
+});
 
 #[derive(PartialEq)]
 pub enum AppState {
@@ -70,6 +79,11 @@ pub struct EguiApp {
     new_msg: String,
     credential_changed: bool,
     show_msg_id: Option<String>,
+    reply_msg: Option<TwitchMsg>,
+    selected_font: String,
+    input_new_channel: bool,
+    max_msg_count: usize,
+    context_msg: Option<TwitchMsg>,
 }
 
 impl Default for EguiApp {
@@ -103,17 +117,35 @@ impl Default for EguiApp {
             new_msg: String::new(),
             credential_changed: false,
             show_msg_id: None,
+            reply_msg: None,
+            selected_font: String::new(),
+            input_new_channel: false,
+            max_msg_count: super::MAX_MESSAGE_COUNT,
+            context_msg: None,
         }
     }
 }
 
 impl EguiApp {
     pub fn new_channel(&mut self, channel_name: &str, filter: Filter) {
-        let mut client = ChannelManager::new(self.irc_client.clone(), channel_name, 1000, filter);
+        let mut client = ChannelManager::new(
+            self.irc_client.clone(),
+            channel_name,
+            self.max_msg_count,
+            filter,
+        );
         client.connect();
         self.channel_list.push(client);
         self.new_channel_name = "".to_owned();
         self.error_msg = None;
+    }
+
+    fn current_channel(&self) -> Option<&ChannelManager> {
+        self.channel_list.get(self.selected_channel)
+    }
+
+    fn current_channel_mut(&mut self) -> Option<&mut ChannelManager> {
+        self.channel_list.get_mut(self.selected_channel)
     }
 
     fn draw_config(&mut self, app_ui: &mut Ui, ctx: &Context) {
@@ -149,6 +181,21 @@ impl EguiApp {
                     };
                     ui.hyperlink_to("Get access token from here", "https://twitchapps.com/tmi/");
                 });
+                ui.add_space(10.0);
+                ComboBox::from_label("Select font")
+                    .selected_text(self.selected_font.to_owned())
+                    .width(300.0)
+                    .show_ui(ui, |ui| {
+                        for font in FONT_LIST.iter() {
+                            if ui
+                                .selectable_value(&mut self.selected_font, font.to_string(), font)
+                                .clicked()
+                            {
+                                set_font(ui.ctx(), Some(&self.selected_font));
+                            }
+                        }
+                    });
+
                 ui.add_space(10.0);
                 ui.group(|ui| {
                     ui.label("Font size:");
@@ -204,6 +251,11 @@ impl EguiApp {
                     }
                 });
                 ui.add_space(10.0);
+                ui.group(|ui| {
+                    ui.label("Max message count:");
+                    ui.add(DragValue::new(&mut self.max_msg_count).speed(20));
+                });
+                ui.add_space(10.0);
                 ui.label("Default filter configurations");
                 draw_filter_config(ui, &mut self.def_filter);
                 ui.add_space(10.0);
@@ -212,24 +264,27 @@ impl EguiApp {
         });
     }
 
-    fn draw_normal(&mut self, app_ui: &mut Ui) {
+    fn draw_normal(&mut self, app_ui: &mut Ui, compact_mode: bool) {
         let main_area_available_size = app_ui.available_size();
         //eprintln!("1 {:?}", main_area_available_size);
-        if main_area_available_size.y / main_area_available_size.x > 0.9 {
+        if compact_mode {
             app_ui.vertical(|ui| {
                 //ui.add_space(main_area_available_size.y / 2.0);
-                self.draw_chat(
-                    ui,
-                    vec2(main_area_available_size.x, main_area_available_size.y / 2.0),
-                    true,
-                    self.font_size,
-                );
-                self.draw_chat(
-                    ui,
-                    vec2(main_area_available_size.x, main_area_available_size.y / 2.0),
-                    false,
-                    self.font_size,
-                );
+                if !self.channel_list.is_empty() {
+                    self.draw_chat(
+                        ui,
+                        vec2(main_area_available_size.x, main_area_available_size.y / 2.0),
+                        true,
+                    );
+                    self.draw_chat(
+                        ui,
+                        vec2(main_area_available_size.x, main_area_available_size.y / 2.0),
+                        false,
+                    );
+                    if let Some(c) = self.current_channel_mut() {
+                        c.read();
+                    }
+                }
             });
         } else {
             app_ui.horizontal(|main_area_ui| {
@@ -241,16 +296,16 @@ impl EguiApp {
                         main_area_ui,
                         vec2(available_width / 2.0, main_area_available_size.y),
                         false,
-                        self.font_size,
                     );
                     main_area_ui.separator();
                     self.draw_chat(
                         main_area_ui,
                         vec2(available_width / 2.0, main_area_available_size.y),
                         true,
-                        self.font_size,
                     );
-                    self.channel_list[self.selected_channel].read();
+                    if let Some(c) = self.current_channel_mut() {
+                        c.read();
+                    }
                 }
             });
         }
@@ -298,6 +353,7 @@ impl EguiApp {
         if !self.access_token.is_empty() && self.re_login().is_err() {
             self.error_msg = Some("Login to chat failed, using anonymous".to_string())
         }
+        self.max_msg_count = save_state.max_msg_count;
         self.channel_list = save_state
             .channels
             .iter()
@@ -305,7 +361,7 @@ impl EguiApp {
                 let mut client = ChannelManager::new(
                     self.irc_client.clone(),
                     save.name.clone(),
-                    super::MAX_MESSAGE_COUNT,
+                    self.max_msg_count,
                     (&save.filter).try_into()?,
                 );
                 if save.enabled {
@@ -336,6 +392,9 @@ impl EguiApp {
         }
         self.alert_volume = save_state.alert_volume;
         self.alert_player.set_volume(save_state.alert_volume);
+        self.selected_channel = save_state.selected_channel;
+        self.selected_font = save_state.selected_font.clone();
+        set_font(ctx, Some(&self.selected_font));
         Ok(())
     }
 
@@ -343,7 +402,23 @@ impl EguiApp {
         &mut self.textures
     }
 
-    fn draw_chat(&mut self, ui: &mut Ui, size: Vec2, filtered: bool, font_size: f32) {
+    fn draw_chat(&mut self, ui: &mut Ui, size: Vec2, filtered: bool) {
+        let mut end_pressed = false;
+        let mut home_pressed = false;
+
+        ui.input_mut(|input| {
+            if input.focused {
+                if input.key_pressed(Key::End) {
+                    end_pressed = true;
+                }
+                if input.key_pressed(Key::Home) {
+                    home_pressed = true;
+                }
+                if input.consume_key(Modifiers::default(), Key::Escape) {
+                    self.reply_msg = None;
+                }
+            }
+        });
         ui.vertical(|ui| {
             ui.set_max_height(size.y);
             ui.set_max_width(size.x);
@@ -356,11 +431,12 @@ impl EguiApp {
                     //}
                     ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                         if !filtered {
+                            let is_connect = self.current_channel().unwrap().is_connected();
                             let mut edit = TextEdit::singleline(&mut self.new_msg)
                                 .desired_width(f32::INFINITY)
                                 .margin(vec2(0.0, 0.0))
                                 .frame(true);
-                            if !self.channel_list[self.selected_channel].is_connected() {
+                            if !is_connect {
                                 edit = edit
                                     .interactive(false)
                                     .hint_text("Channel is not connected");
@@ -374,9 +450,38 @@ impl EguiApp {
                             if response.lost_focus() {
                                 ui.input_mut(|input| {
                                     if input.consume_key(Modifiers::default(), Key::Enter) {
-                                        self.channel_list[self.selected_channel]
-                                            .send_msg(self.new_msg.clone());
+                                        self.current_channel()
+                                            .unwrap()
+                                            .send_msg(self.new_msg.clone(), self.reply_msg.clone());
                                         self.new_msg = String::new();
+                                        self.reply_msg = None;
+                                    }
+                                });
+                            }
+                            if !self.input_new_channel {
+                                response.request_focus();
+                            }
+                            if let Some(reply_msg) = &self.reply_msg {
+                                ui.add(Label::new(
+                                    RichText::new(format!(
+                                        "╭{}: {}",
+                                        match self.name_display {
+                                            NameDisplay::Both => format!(
+                                                "{}({})",
+                                                reply_msg.sender_display(),
+                                                reply_msg.sender_login()
+                                            ),
+                                            NameDisplay::NickName =>
+                                                reply_msg.sender_display().to_string(),
+                                            NameDisplay::Id => reply_msg.sender_login().to_string(),
+                                        },
+                                        reply_msg.payload()
+                                    ))
+                                    .size(self.font_size * 0.8),
+                                ))
+                                .context_menu(|ui| {
+                                    if ui.button("Cancel").clicked() {
+                                        self.reply_msg = None;
                                     }
                                 });
                             }
@@ -392,15 +497,14 @@ impl EguiApp {
                                 });
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     let log_status = if filtered {
-                                        self.channel_list[self.selected_channel]
-                                            .filtered_log_status()
+                                        self.current_channel().unwrap().filtered_log_status()
                                     } else {
-                                        self.channel_list[self.selected_channel].log_status()
+                                        self.current_channel().unwrap().log_status()
                                     };
                                     match log_status {
                                         None => {
                                             let response = ui.button("Log");
-                                            if self.channel_list[self.selected_channel].state()
+                                            if self.current_channel().unwrap().state()
                                                 != ChannelConnectionState::Joined
                                             {
                                                 response.on_hover_text(
@@ -421,10 +525,12 @@ impl EguiApp {
                                                     .clicked()
                                                 {
                                                     if filtered {
-                                                        self.channel_list[self.selected_channel]
+                                                        self.current_channel_mut()
+                                                            .unwrap()
                                                             .set_filtered_log(None);
                                                     } else {
-                                                        self.channel_list[self.selected_channel]
+                                                        self.current_channel_mut()
+                                                            .unwrap()
                                                             .set_log(None);
                                                     }
                                                 }
@@ -438,10 +544,12 @@ impl EguiApp {
                                                     .clicked()
                                                 {
                                                     if filtered {
-                                                        self.channel_list[self.selected_channel]
+                                                        self.current_channel_mut()
+                                                            .unwrap()
                                                             .set_filtered_log(None);
                                                     } else {
-                                                        self.channel_list[self.selected_channel]
+                                                        self.current_channel_mut()
+                                                            .unwrap()
                                                             .set_log(None);
                                                     }
                                                 }
@@ -450,27 +558,19 @@ impl EguiApp {
                                     }
 
                                     if ui.button("Clear").clicked() {
-                                        self.channel_list[self.selected_channel]
-                                            .clear_msg(filtered);
+                                        self.current_channel_mut().unwrap().clear_msg(filtered);
                                     }
+
+                                    ui.label(format!(
+                                        "{} / {}",
+                                        self.current_channel_mut().unwrap().get_msg_count(filtered),
+                                        self.max_msg_count
+                                    ));
                                 });
                             });
                             ui.separator();
-                            let mut end_pressed = false;
-                            let mut home_pressed = false;
 
-                            ui.input_mut(|input| {
-                                if input.focused {
-                                    if input.consume_key(Modifiers::default(), Key::End) {
-                                        end_pressed = true;
-                                    }
-                                    if input.consume_key(Modifiers::default(), Key::Home) {
-                                        home_pressed = true;
-                                    }
-                                }
-                            });
-
-                            let mut highlight_message_found = false;
+                            let mut highlight_message_found = self.show_msg_id.is_none();
                             ScrollArea::vertical()
                                 .id_source(filtered)
                                 //.auto_shrink([false, false])
@@ -481,8 +581,7 @@ impl EguiApp {
                                     if home_pressed {
                                         ui.scroll_to_cursor(None);
                                     }
-                                    let client = &self.channel_list[self.selected_channel];
-                                    for msg in client.get_msg(filtered) {
+                                    for msg in self.current_channel().unwrap().get_msg(filtered) {
                                         if !filtered {
                                             if let Some(id) = &self.show_msg_id {
                                                 if id == msg.id() {
@@ -491,7 +590,7 @@ impl EguiApp {
                                                 }
                                             }
                                         }
-                                        self.draw_msg(ui, &msg, font_size);
+                                        self.draw_msg(ui, &msg);
                                     }
                                     ui.input(|i| {
                                         if i.pointer.button_clicked(egui::PointerButton::Primary) {
@@ -502,14 +601,14 @@ impl EguiApp {
                                         ui.scroll_to_cursor(None);
                                     }
                                 });
-                            if !highlight_message_found {
+                            if !filtered && !highlight_message_found {
                                 self.show_msg_id = None;
                             }
                         });
                     });
 
                     //area.show_rows(ui, row_height, num_rows, |ui, row_range| {
-                    //    let client = &self.channel_list[self.selected_channel];
+                    //    let client = &self.current_channel();
                     //    for msg in client.get_n_msg(row_range, filtered) {
                     //        self.draw_msg(ui, &msg, font_size);
                     //    }
@@ -519,7 +618,7 @@ impl EguiApp {
         });
     }
 
-    fn draw_msg(&mut self, ui: &mut Ui, msg: &TwitchMsg, font_size: f32) -> InnerResponse<()> {
+    fn draw_msg(&mut self, ui: &mut Ui, msg: &TwitchMsg) -> InnerResponse<()> {
         let text_style = TextStyle::Body;
         let row_height = ui.text_style_height(&text_style) + 1.0;
         let highlight = if let Some(id) = &self.show_msg_id {
@@ -537,7 +636,7 @@ impl EguiApp {
         } else {
             ui.visuals().text_color()
         };
-        let mut color = if self.use_twitch_color {
+        let mut username_color = if self.use_twitch_color {
             msg.name_color()
                 .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
                 .unwrap_or(ui.style().visuals.warn_fg_color)
@@ -546,7 +645,7 @@ impl EguiApp {
         };
 
         if self.readable_color_adjustment {
-            color = adjust_readable_color(color, bg_color);
+            username_color = adjust_readable_color(username_color, bg_color);
         }
         if let Some(((reply_author_id, reply_author_name), reply_msg_body)) = msg
             .tag("reply-parent-user-login")
@@ -578,73 +677,122 @@ impl EguiApp {
             });
         }
         let main_space = ui.horizontal_wrapped(|ui| {
+            let time_str;
+            let message;
+            let mut items = vec![];
             if self.show_sent_time {
                 let local_time = msg.sent_time().unwrap().with_timezone(&chrono::Local);
-                ui.label(local_time.format("%H:%M:%S").to_string());
+                //ui.label(local_time.format("%H:%M:%S").to_string());
+                time_str = local_time.format("%H:%M:%S ").to_string();
+                items.push(DisplayItem::Text(
+                    &time_str,
+                    Some(text_color),
+                    Some(bg_color),
+                ));
             }
             for (badge_name, _) in msg.badges().iter() {
                 if badge_name == super::filter::BROADCASTER_BADGE_NAME {
-                    ui.image(
+                    //ui.image(
+                    //    self.textures
+                    //        .get(super::filter::BROADCASTER_BADGE_NAME)
+                    //        .unwrap(),
+                    //    vec2(row_height, row_height),
+                    //);
+                    items.push(DisplayItem::Image(
                         self.textures
                             .get(super::filter::BROADCASTER_BADGE_NAME)
-                            .unwrap(),
-                        vec2(row_height, row_height),
-                    );
+                            .unwrap()
+                            .clone(),
+                    ));
                 }
                 if badge_name == super::filter::MODERATOR_BADGE_NAME {
-                    ui.image(
+                    //ui.image(
+                    //    self.textures
+                    //        .get(super::filter::MODERATOR_BADGE_NAME)
+                    //        .unwrap(),
+                    //    vec2(row_height, row_height),
+                    //);
+                    items.push(DisplayItem::Image(
                         self.textures
                             .get(super::filter::MODERATOR_BADGE_NAME)
-                            .unwrap(),
-                        vec2(row_height, row_height),
-                    );
+                            .unwrap()
+                            .clone(),
+                    ));
                 }
                 if badge_name == super::filter::PARTNER_BADGE_NAME {
-                    ui.image(
+                    //ui.image(
+                    //    self.textures
+                    //        .get(super::filter::PARTNER_BADGE_NAME)
+                    //        .unwrap(),
+                    //    vec2(row_height, row_height),
+                    //);
+                    items.push(DisplayItem::Image(
                         self.textures
                             .get(super::filter::PARTNER_BADGE_NAME)
-                            .unwrap(),
-                        vec2(row_height, row_height),
-                    );
+                            .unwrap()
+                            .clone(),
+                    ));
                 }
                 if badge_name == super::filter::VIP_BADGE_NAME {
-                    ui.image(
-                        self.textures.get(super::filter::VIP_BADGE_NAME).unwrap(),
-                        vec2(row_height, row_height),
-                    );
+                    //ui.image(
+                    //    self.textures.get(super::filter::VIP_BADGE_NAME).unwrap(),
+                    //    vec2(row_height, row_height),
+                    //);
+                    items.push(DisplayItem::Image(
+                        self.textures
+                            .get(super::filter::VIP_BADGE_NAME)
+                            .unwrap()
+                            .clone(),
+                    ));
                 }
             }
-            let mut layout = LayoutJob {
-                wrap: TextWrapping {
-                    max_width: ui.available_width(),
-                    break_anywhere: true,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let format: TextFormat = TextFormat {
-                font_id: FontId::new(font_size, Proportional),
-                color: text_color,
-                background: bg_color,
-                ..Default::default()
-            };
+            //let mut layout = LayoutJob {
+            //    wrap: TextWrapping {
+            //        max_width: ui.available_width(),
+            //        break_anywhere: true,
+            //        ..Default::default()
+            //    },
+            //    ..Default::default()
+            //};
+            //let format: TextFormat = TextFormat {
+            //    color: text_color,
+            //    background: bg_color,
+            //    font_id: TextStyle::Body.resolve(ui.style()),
+            //    ..Default::default()
+            //};
             let name = match self.name_display {
                 NameDisplay::Both => format!("{}({})", msg.sender_display(), msg.sender_login()),
                 NameDisplay::NickName => msg.sender_display().to_owned(),
                 NameDisplay::Id => msg.sender_login().to_owned(),
             };
-            layout.append(
+            //layout.append(
+            //    &name,
+            //    0.0,
+            //    TextFormat {
+            //        color,
+            //        ..format.clone()
+            //    },
+            //);
+            items.push(DisplayItem::Text(
                 &name,
-                0.0,
-                TextFormat {
-                    color,
-                    ..format.clone()
-                },
-            );
-            layout.append(": ", 0.0, format.clone());
-            layout.append(msg.payload().trim(), 0.0, format);
+                Some(username_color),
+                Some(bg_color),
+            ));
+            //layout.append(": ", 0.0, format.clone());
+            //layout.append(msg.payload().trim(), 0.0, format);
+            message = format!(": {}", msg.payload().trim());
+            items.push(DisplayItem::Text(
+                &message,
+                Some(text_color),
+                Some(bg_color),
+            ));
 
-            let response: Response = ui.label(layout).context_menu(|ui| {
+            let response: Response = draw_text_and_image(ui, items, ui.available_width(), 5.0);
+            if response.is_pointer_button_down_on() {
+                self.context_msg = Some(msg.clone());
+            }
+            response.context_menu(|ui| {
+                let msg = self.context_msg.clone().unwrap();
                 ui.set_width(400.0);
                 ui.hyperlink_to(
                     format!("{}({})", msg.sender_display(), msg.sender_login()),
@@ -698,9 +846,15 @@ impl EguiApp {
                 if drew_badge {
                     ui.separator();
                 }
+                if ui.button("Reply to this").clicked() {
+                    self.reply_msg = Some(msg.clone());
+                    ui.close_menu();
+                }
                 if ui.button("Add user to filter").clicked() {
                     match Regex::new(&regex::escape(msg.sender_login())) {
-                        Ok(r) => self.channel_list[self.selected_channel]
+                        Ok(r) => self
+                            .current_channel_mut()
+                            .unwrap()
                             .mut_filter(|f| f.add_author_pat(r)),
                         Err(e) => self.error_msg = Some(format!("{}", e)),
                     }
@@ -708,7 +862,9 @@ impl EguiApp {
                 }
                 if ui.button("Add user to exclusive filter").clicked() {
                     match Regex::new(&regex::escape(msg.sender_login())) {
-                        Ok(r) => self.channel_list[self.selected_channel]
+                        Ok(r) => self
+                            .current_channel_mut()
+                            .unwrap()
                             .mut_filter(|f| f.add_exc_author_pat(r)),
                         Err(e) => self.error_msg = Some(format!("{}", e)),
                     }
@@ -730,9 +886,6 @@ impl EguiApp {
                     ui.close_menu();
                 }
             });
-            if response.hovered() {
-                response.highlight();
-            }
         });
         ui.separator();
         main_space
@@ -740,44 +893,41 @@ impl EguiApp {
 
     fn draw_channel_list(&mut self, ui: &mut Ui, size: Vec2) {
         let mut remove_channel = None;
-        let uninitialized_color = if self.readable_color_adjustment {
-            adjust_readable_color(Color32::GRAY, ui.visuals().panel_fill)
-        } else {
-            Color32::GRAY
-        };
-        let joined_color = if self.readable_color_adjustment {
-            adjust_readable_color(Color32::GREEN, ui.visuals().panel_fill)
-        } else {
-            Color32::GREEN
-        };
-        let logging_color = if self.readable_color_adjustment {
-            adjust_readable_color(Color32::BLUE, ui.visuals().panel_fill)
-        } else {
-            Color32::BLUE
-        };
 
         ui.vertical(|channel_list_ui| {
             channel_list_ui.set_height(size.y);
             channel_list_ui.set_width(size.x);
             ScrollArea::vertical().show(channel_list_ui, |channel_list_ui| {
                 for (idx, client) in self.channel_list.iter_mut().enumerate() {
+                    let bg_color = if self.selected_channel == idx {
+                        channel_list_ui.visuals().selection.bg_fill
+                    } else {
+                        channel_list_ui.visuals().panel_fill
+                    };
+                    let text_color = match client.state() {
+                        ChannelConnectionState::Uninitialized => Color32::GRAY,
+                        ChannelConnectionState::Joined => {
+                            if client.log_status().is_some()
+                                || client.filtered_log_status().is_some()
+                            {
+                                Color32::BLUE
+                            } else {
+                                Color32::GREEN
+                            }
+                        }
+                    };
                     channel_list_ui.horizontal(|channel_ui| {
-                        channel_ui
-                            .radio_value(
+                        if channel_ui
+                            .selectable_value(
                                 &mut self.selected_channel,
                                 idx,
-                                RichText::new(client.channel_name()).color(match client.state() {
-                                    ChannelConnectionState::Uninitialized => uninitialized_color,
-                                    ChannelConnectionState::Joined => {
-                                        if client.log_status().is_some()
-                                            || client.filtered_log_status().is_some()
-                                        {
-                                            logging_color
-                                        } else {
-                                            joined_color
-                                        }
-                                    }
-                                }),
+                                RichText::new(client.channel_name()).color(
+                                    if self.readable_color_adjustment {
+                                        adjust_readable_color(text_color, bg_color)
+                                    } else {
+                                        text_color
+                                    },
+                                ),
                             )
                             .context_menu(|ui| {
                                 ui.hyperlink_to(
@@ -794,7 +944,11 @@ impl EguiApp {
                                     remove_channel = Some(idx);
                                     ui.close_menu();
                                 }
-                            });
+                            })
+                            .clicked()
+                        {
+                            self.state = AppState::Normal;
+                        };
 
                         channel_ui.with_layout(Layout::right_to_left(Align::RIGHT), |sub_ui| {
                             let mut switch = client.is_connected();
@@ -821,8 +975,16 @@ impl EguiApp {
                     channel_list_ui.separator();
                 }
                 channel_list_ui.add_space(5.0);
-                channel_list_ui.horizontal(|new_channel_ui| {
-                    let response = new_channel_ui.text_edit_singleline(&mut self.new_channel_name);
+                channel_list_ui.with_layout(Layout::right_to_left(Align::Min), |new_channel_ui| {
+                    if new_channel_ui.button("+").clicked() {
+                        self.new_channel(
+                            &self.new_channel_name.clone(),
+                            (&self.def_filter).try_into().unwrap(),
+                        );
+                    }
+                    let edit = TextEdit::singleline(&mut self.new_channel_name)
+                        .desired_width(f32::INFINITY);
+                    let response = new_channel_ui.add(edit);
                     if response.lost_focus() {
                         new_channel_ui.input_mut(|input| {
                             if input.consume_key(Modifiers::default(), Key::Enter) {
@@ -832,12 +994,10 @@ impl EguiApp {
                                 );
                             }
                         });
+                        self.input_new_channel = false;
                     }
-                    if new_channel_ui.button("+").clicked() {
-                        self.new_channel(
-                            &self.new_channel_name.clone(),
-                            (&self.def_filter).try_into().unwrap(),
-                        );
+                    if response.gained_focus() {
+                        self.input_new_channel = true;
                     }
                 });
                 if let Some(err) = &self.error_msg {
@@ -847,8 +1007,8 @@ impl EguiApp {
         });
         if let Some(idx) = remove_channel {
             self.channel_list.remove(idx);
-            if self.selected_channel == idx && idx > 0 {
-                self.selected_channel = idx - 1;
+            if self.selected_channel >= idx && idx > 0 {
+                self.selected_channel -= 1;
             }
         }
     }
@@ -901,9 +1061,17 @@ impl eframe::App for EguiApp {
                             Err(e) => self.error_msg = Some(format!("{}", e)),
                         }
                     }
+                    ui.separator();
                 }
                 if ui
-                    .selectable_label(self.state == AppState::Config, "Configuration")
+                    .selectable_label(
+                        self.state == AppState::Config,
+                        if self.state == AppState::Config {
+                            "Back"
+                        } else {
+                            "Configuration"
+                        },
+                    )
                     .clicked()
                 {
                     match &self.state {
@@ -921,6 +1089,9 @@ impl eframe::App for EguiApp {
                             } else {
                                 self.error_msg = None;
                                 self.state = AppState::Normal;
+                                for channel in self.channel_list.iter_mut() {
+                                    channel.set_max_msg_count(self.max_msg_count);
+                                }
                             }
                         }
                         _ => {
@@ -930,10 +1101,36 @@ impl eframe::App for EguiApp {
                         }
                     }
                 }
-
-                if compact_mode {
+                ui.separator();
+                if compact_mode
+                    && (self.state == AppState::Normal || self.state == AppState::ChannelList)
+                {
+                    let mut layout_job = LayoutJob::default();
+                    layout_job.append(
+                        "Channel list",
+                        0.0,
+                        TextFormat {
+                            font_id: TextStyle::Body.resolve(ui.style()),
+                            ..Default::default()
+                        },
+                    );
+                    if self
+                        .channel_list
+                        .iter()
+                        .any(|c| c.has_unread_filtered_msg())
+                    {
+                        layout_job.append(
+                            "!",
+                            5.0,
+                            TextFormat {
+                                color: ui.style().visuals.warn_fg_color,
+                                font_id: TextStyle::Body.resolve(ui.style()),
+                                ..Default::default()
+                            },
+                        );
+                    }
                     if ui
-                        .selectable_label(self.state == AppState::ChannelList, "Channel list")
+                        .selectable_label(self.state == AppState::ChannelList, layout_job)
                         .clicked()
                     {
                         if self.state != AppState::ChannelList {
@@ -942,11 +1139,19 @@ impl eframe::App for EguiApp {
                             self.state = AppState::Normal;
                         }
                     }
+
+                    if let Some(channel) = self.current_channel() {
+                        ui.separator();
+                        ui.hyperlink_to(
+                            format!("#{}", channel.channel_name()),
+                            format!("https://www.twitch.tv/{}", channel.channel_name()),
+                        );
+                    }
                 }
             });
             app_ui.separator();
             match &mut self.state {
-                AppState::Normal => self.draw_normal(app_ui),
+                AppState::Normal => self.draw_normal(app_ui, compact_mode),
                 AppState::Config => self.draw_config(app_ui, ctx),
                 AppState::ChannelConfig(_, _) => self.draw_channel_config(app_ui),
                 AppState::ChannelList => self.draw_channel_list(app_ui, app_ui.available_size()),
@@ -1014,6 +1219,9 @@ pub struct AppSaveState {
     readable_color_adjustment: bool,
     dark_theme: bool,
     alert_volume: f32,
+    selected_channel: usize,
+    selected_font: String,
+    max_msg_count: usize,
 }
 
 impl From<&EguiApp> for AppSaveState {
@@ -1042,6 +1250,9 @@ impl From<&EguiApp> for AppSaveState {
             readable_color_adjustment: value.readable_color_adjustment,
             dark_theme: value.dark_theme,
             alert_volume: value.alert_volume,
+            selected_channel: value.selected_channel,
+            selected_font: value.selected_font.clone(),
+            max_msg_count: value.max_msg_count,
         }
     }
 }
@@ -1126,4 +1337,150 @@ fn adjust_readable_color(fg: Color32, bg: Color32) -> Color32 {
         color = Color32::from_rgb(new_rgb[0], new_rgb[1], new_rgb[2]);
     }
     color
+}
+
+pub fn set_font(ctx: &Context, mut font_family: Option<&str>) {
+    let mut fonts = FontDefinitions::default();
+    fonts.font_data.insert(
+        "NotoMerged".to_owned(),
+        FontData::from_static(include_bytes!("../fonts/NotoSansMerged-Regular.otf")),
+    );
+    if font_family == Some("") {
+        font_family = None;
+    }
+    if let Some(family) = font_family {
+        let property = system_fonts::FontPropertyBuilder::new()
+            .family(family)
+            .build();
+        let (font_data, _) = system_fonts::get(&property).unwrap();
+        fonts
+            .font_data
+            .insert(family.to_owned(), FontData::from_owned(font_data));
+        fonts
+            .families
+            .get_mut(&FontFamily::Proportional)
+            .unwrap()
+            .insert(0, family.to_owned());
+    }
+    fonts
+        .families
+        .get_mut(&FontFamily::Proportional)
+        .unwrap()
+        .insert(
+            if font_family.is_some() { 1 } else { 0 },
+            "NotoMerged".to_owned(),
+        );
+    ctx.set_fonts(fonts);
+}
+
+enum DisplayItem<'a> {
+    Text(&'a str, Option<Color32>, Option<Color32>),
+    Image(TextureHandle),
+}
+
+fn draw_text_and_image(
+    ui: &mut Ui,
+    items: Vec<DisplayItem>,
+    max_width: f32,
+    image_margin: f32,
+) -> Response {
+    let start_pos = ui.cursor().min;
+    let mut cursor_pos = start_pos;
+    let text_style = TextStyle::Body;
+    let row_height = ui.text_style_height(&text_style) + 1.0;
+    let text_format = TextFormat {
+        font_id: ui.style().text_styles.get(&text_style).unwrap().clone(),
+        ..Default::default()
+    };
+
+    {
+        let painter = ui.painter();
+        for item in items.into_iter() {
+            match item {
+                DisplayItem::Image(t) => {
+                    if cursor_pos.x + row_height + image_margin - start_pos.x > max_width {
+                        cursor_pos.y += row_height;
+                        cursor_pos.x = start_pos.x;
+                        painter.image(
+                            (&t).into(),
+                            Rect::from_min_max(
+                                cursor_pos,
+                                pos2(cursor_pos.x + row_height, cursor_pos.y + row_height),
+                            ),
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                        cursor_pos.x += row_height + image_margin;
+                    } else {
+                        cursor_pos.x += image_margin;
+                        painter.image(
+                            (&t).into(),
+                            Rect::from_min_max(
+                                cursor_pos,
+                                pos2(cursor_pos.x + row_height, cursor_pos.y + row_height),
+                            ),
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                        cursor_pos.x += row_height + image_margin;
+                    }
+                }
+                DisplayItem::Text(text, fg, bg) => {
+                    let mut layout = LayoutJob::default();
+                    layout.wrap = TextWrapping {
+                        max_width: max_width,
+                        break_anywhere: true,
+                        ..Default::default()
+                    };
+                    layout.append(
+                        text,
+                        cursor_pos.x - start_pos.x,
+                        TextFormat {
+                            color: fg.unwrap_or(ui.visuals().text_color()),
+                            background: bg.unwrap_or(ui.visuals().panel_fill),
+                            ..text_format.clone()
+                        },
+                    );
+                    let mut galley = None;
+                    ui.fonts(|fonts| {
+                        galley = Some(fonts.layout_job(layout));
+                    });
+                    let mut next_pos = cursor_pos;
+                    let galley = galley.unwrap();
+                    next_pos.x = start_pos.x + galley.rows.last().unwrap().rect.max.x;
+                    next_pos.y += (galley.rows.len() as f32 - 1.0) * row_height;
+                    painter.galley(pos2(start_pos.x, cursor_pos.y), galley);
+                    cursor_pos = next_pos;
+                }
+            }
+        }
+    }
+    let (_rect, response) = ui.allocate_exact_size(
+        vec2(max_width, cursor_pos.y - start_pos.y + row_height),
+        Sense::click(),
+    );
+    let painter = ui.painter();
+    if response.hovered() {
+        let mut i = start_pos.y;
+        while i < cursor_pos.y {
+            painter.hline(
+                start_pos.x..=start_pos.x + max_width,
+                i + row_height,
+                Stroke {
+                    width: 1.0,
+                    color: ui.visuals().text_color(),
+                },
+            );
+            i += row_height;
+        }
+        painter.hline(
+            start_pos.x..=cursor_pos.x,
+            i + row_height,
+            Stroke {
+                width: 1.0,
+                color: ui.visuals().text_color(),
+            },
+        );
+    }
+    response
 }

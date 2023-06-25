@@ -24,6 +24,7 @@ irc = "0.15.0"
 futures = "0.3.28"
 once_cell = "1.18.0"
 git-version = "0.3.5"
+font-loader = "0.11.0"
 
 [build-dependencies]
 embed-resource = "2.1.1"

@@ -29,7 +29,7 @@ use tokio::{
 
 pub struct IrcClient {
     new_channel_tx: mpsc::Sender<(String, Option<Arc<Mutex<SharedData>>>)>,
-    send_msg_tx: mpsc::Sender<(String, String)>,
+    send_msg_tx: mpsc::Sender<(String, String, Option<TwitchMsg>)>,
     _worker_handle: JoinHandle<()>,
 }
 
@@ -47,6 +47,7 @@ impl IrcClient {
                 Capability::EchoMessage,
             ])
             .unwrap();
+
         let first_msg = stream.next().await.and_then(|r| r.ok());
         if let Some(msg) = first_msg {
             if let Command::Response(t, message) = msg.command {
@@ -61,7 +62,8 @@ impl IrcClient {
         } else {
             return Err(());
         }
-        let (msg_tx, mut msg_rx) = mpsc::channel::<(String, String)>(10);
+        let (send_msg_tx, mut send_msg_rx) =
+            mpsc::channel::<(String, String, Option<TwitchMsg>)>(10);
         //eprintln!("starting");
         let handle = ASYNC_RUNTIME.spawn(async move {
             //dbg!("starting worker");
@@ -69,9 +71,13 @@ impl IrcClient {
             let mut sent_msg = None;
             loop {
                 tokio::select! {
-                    Some((target, msg)) = msg_rx.recv() => {
-                        client.send_privmsg(&target, &msg).unwrap();
-                        sent_msg = Some(msg.clone());
+                    Some((target, msg, reply_msg)) = send_msg_rx.recv() => {
+                        if let Some(reply_msg) = &reply_msg {
+                            client.send(Message::with_tags(Some(vec![Tag("reply-parent-msg-id".to_string(), Some(reply_msg.id().to_string()))]), None, "PRIVMSG", vec![&target, &msg]).unwrap()).unwrap();
+                        } else {
+                            client.send(Message::with_tags(None, None, "PRIVMSG", vec![&target, &msg]).unwrap()).unwrap();
+                        }
+                        sent_msg = Some((msg, reply_msg));
                     }
                     Some((channel_name, data_opt)) = new_channel_rx.recv() => {
                         if let Some(data) = data_opt {
@@ -122,9 +128,15 @@ impl IrcClient {
                                 }
                                 Command::Raw(t, channel_list) => {
                                     if t == "USERSTATE" {
-                                        if let Some(sent_msg_content) = sent_msg {
+                                        if let Some((sent_msg_content, reply_to)) = sent_msg {
                                             let mut tags = msg.tags.clone().unwrap();
                                             tags.push(Tag("tmi-sent-ts".to_string(), Some(format!("{}", chrono::Utc::now().timestamp_millis()))));
+                                            if let Some(reply_to) = reply_to {
+                                                tags.push(Tag("reply-parent-msg-id".to_string(), Some(reply_to.id().to_string())));
+                                                tags.push(Tag("reply-parent-user-login".to_string(), Some(reply_to.sender_login().to_string())));
+                                                tags.push(Tag("reply-parent-display-name".to_string(), Some(reply_to.sender_display().to_string())));
+                                                tags.push(Tag("reply-parent-msg-body".to_string(), Some(reply_to.payload().to_string())));
+                                            }
                                             let prefix = format!("{}!{}@{}.tmi.twitch.tv", &worker_username, &worker_username, &worker_username);
                                             let msg_obj = Message::with_tags(Some(tags), Some(&prefix), "PRIVMSG", vec![&channel_list[0], &sent_msg_content]).unwrap();
                                             if let Some(data) = channel_dict.get(&channel_list[0]) {
@@ -147,7 +159,7 @@ impl IrcClient {
         Ok(Self {
             new_channel_tx,
             _worker_handle: handle,
-            send_msg_tx: msg_tx,
+            send_msg_tx,
         })
     }
 
@@ -168,8 +180,11 @@ impl IrcClient {
             .unwrap();
     }
 
-    async fn send_msg(&self, target: String, msg: String) {
-        self.send_msg_tx.send((target, msg)).await.unwrap()
+    async fn send_msg(&self, target: String, msg: String, reply_msg: Option<TwitchMsg>) {
+        self.send_msg_tx
+            .send((target, msg, reply_msg))
+            .await
+            .unwrap()
     }
 }
 
@@ -202,13 +217,14 @@ async fn handle_msg(mut msg: TwitchMsg, data: &Arc<Mutex<SharedData>>) {
             }
         }
 
-        shared_data.filtered_msg_list.push_back(msg);
+        shared_data.filtered_msg_list.push_back(msg.clone());
         while shared_data.filtered_msg_list.len() > shared_data.max_msg_count {
             shared_data.filtered_msg_list.pop_front();
         }
         if let Some(player) = &shared_data.alert {
             player.play().unwrap();
         }
+
         shared_data.has_unread_filtered_msg = true;
     }
 }
@@ -444,12 +460,12 @@ impl ChannelManager {
         });
     }
 
-    pub fn send_msg(&self, msg: String) {
+    pub fn send_msg(&self, msg: String, reply_id: Option<TwitchMsg>) {
         ASYNC_RUNTIME.block_on(async {
             self.client
                 .lock()
                 .await
-                .send_msg(format!("#{}", self.channel_name), msg)
+                .send_msg(format!("#{}", self.channel_name), msg, reply_id)
                 .await;
         });
     }
@@ -461,6 +477,12 @@ impl ChannelManager {
             } else {
                 self.shared_data.lock().await.msg_list.clear();
             }
+        });
+    }
+
+    pub fn set_max_msg_count(&mut self, count: usize) {
+        ASYNC_RUNTIME.block_on(async {
+            self.shared_data.lock().await.max_msg_count = count;
         });
     }
 }
@@ -486,6 +508,8 @@ pub struct TwitchMsg {
     sender_display: String,
     channel: String,
     id: String,
+    #[allow(dead_code)]
+    paid_info: Option<PaidInfo>,
 }
 
 impl TwitchMsg {
@@ -599,6 +623,37 @@ impl TryFrom<Message> for TwitchMsg {
         } else {
             return Err(());
         };
+        let paid_info = if let Some(tags) = &value.tags {
+            if let Some(amount) = search_tag("pinned-chat-paid-amount", tags) {
+                let amount = amount.parse::<f32>().unwrap();
+                let canonical_amount = search_tag("pinned-chat-paid-canonical-amount", tags)
+                    .unwrap()
+                    .parse::<f32>()
+                    .unwrap();
+                let currency = search_tag("pinned-chat-paid-currency", tags)
+                    .unwrap()
+                    .to_owned();
+                let exponent = search_tag("pinned-chat-paid-exponent", tags)
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                let paid_level = search_tag("pinned-chat-paid-level", tags)
+                    .unwrap()
+                    .to_owned();
+                Some(PaidInfo {
+                    amount,
+                    canonical_amount,
+                    currency,
+                    exponent,
+                    paid_level,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             _source: value,
             payload,
@@ -606,6 +661,7 @@ impl TryFrom<Message> for TwitchMsg {
             sender_display,
             channel,
             id,
+            paid_info,
         })
     }
 }
@@ -617,4 +673,15 @@ fn search_tag<'a>(target: &str, tags: &'a [Tag]) -> Option<&'a String> {
         }
     }
     None
+}
+
+// Message { tags: Some([Tag("badge-info", Some("subscriber/3")), Tag("badges", Some("subscriber/3")), Tag("color", Some("#FF4500")), Tag("display-name", Some("夜希_厄介幫")), Tag("emotes", Some("emotesv2_a9ffda55713e4d9188219bfb198bdd42:0-8,14-22")), Tag("first-msg", Some("0")), Tag("flags", Some("")), Tag("id", Some("2f9a0ba0-e955-4255-80eb-f320980c2e0d")), Tag("mod", Some("0")), Tag("pinned-chat-paid-amount", Some("3500")), Tag("pinned-chat-paid-canonical-amount", Some("3500")), Tag("pinned-chat-paid-currency", Some("TWD")), Tag("pinned-chat-paid-exponent", Some("2")), Tag("pinned-chat-paid-is-system-message", Some("0")), Tag("pinned-chat-paid-level", Some("ONE")), Tag("returning-chatter", Some("0")), Tag("room-id", Some("123499768")), Tag("subscriber", Some("1")), Tag("tmi-sent-ts", Some("1687518703579")), Tag("turbo", Some("0")), Tag("user-id", Some("61197332")), Tag("user-type", Some(""))]), prefix: Some(Nickname("d931101", "d931101", "d931101.tmi.twitch.tv")), command: PRIVMSG("#ren0809k", "renkoSpin 給你錢 renkoSpin") }
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PaidInfo {
+    amount: f32,
+    canonical_amount: f32,
+    currency: String,
+    exponent: usize,
+    paid_level: String,
 }
