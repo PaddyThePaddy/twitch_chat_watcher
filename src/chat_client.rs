@@ -40,13 +40,6 @@ impl IrcClient {
         let mut worker_username = username.to_string();
         let password = password.to_string();
         let (mut client, mut stream) = connect_client(&worker_username, &password).await.unwrap();
-        client
-            .send_cap_req(&[
-                Capability::Custom("twitch.tv/commands"),
-                Capability::Custom("twitch.tv/tags"),
-                Capability::EchoMessage,
-            ])
-            .unwrap();
 
         let first_msg = stream.next().await.and_then(|r| r.ok());
         if let Some(msg) = first_msg {
@@ -249,6 +242,14 @@ async fn connect_client(
     client.identify()?;
 
     let stream = client.stream()?;
+    client
+        .send_cap_req(&[
+            Capability::Custom("twitch.tv/commands"),
+            Capability::Custom("twitch.tv/tags"),
+            Capability::EchoMessage,
+        ])
+        .unwrap();
+
     Ok((client, stream))
 }
 
