@@ -10,6 +10,7 @@ use super::{
 };
 use arboard::Clipboard;
 use cached::proc_macro::cached;
+use chrono::{DateTime, Utc};
 use eframe::{
     egui::{
         self, ComboBox, Context, DragValue, FontData, FontDefinitions, FontFamily::*, FontId,
@@ -30,7 +31,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration, vec};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, vec};
 
 const ANONYMOUS_USERNAME: &str = "justinfan123";
 const ANONYMOUS_PASSWORD: &str = "";
@@ -84,6 +85,7 @@ pub struct EguiApp {
     input_new_channel: bool,
     max_msg_count: usize,
     context_msg: Option<TwitchMsg>,
+    last_time_updated: DateTime<Utc>,
 }
 
 impl Default for EguiApp {
@@ -122,6 +124,7 @@ impl Default for EguiApp {
             input_new_channel: false,
             max_msg_count: super::MAX_MESSAGE_COUNT,
             context_msg: None,
+            last_time_updated: Utc::now(),
         }
     }
 }
@@ -1037,6 +1040,12 @@ impl EguiApp {
 
 impl eframe::App for EguiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let now = Utc::now();
+        if now - self.last_time_updated < chrono::Duration::milliseconds(100) {
+            std::thread::sleep(std::time::Duration::from_millis(
+                100 - (now.timestamp_millis() - self.last_time_updated.timestamp_millis()) as u64,
+            ));
+        }
         if let Some((idx, filtered)) = self.log_btn {
             if let Some(path) = FileDialog::new().save_file() {
                 if filtered {
@@ -1047,7 +1056,7 @@ impl eframe::App for EguiApp {
             }
             self.log_btn = None;
         }
-        ctx.request_repaint_after(Duration::from_secs(1));
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
         egui::CentralPanel::default().show(ctx, |app_ui| {
             let compact_mode = app_ui.available_height() / app_ui.available_width() > 0.9;
             app_ui.horizontal(|ui| {
@@ -1157,6 +1166,7 @@ impl eframe::App for EguiApp {
                 AppState::ChannelList => self.draw_channel_list(app_ui, app_ui.available_size()),
             }
         });
+        self.last_time_updated = now;
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
