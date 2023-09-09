@@ -86,6 +86,8 @@ pub struct EguiApp {
     max_msg_count: usize,
     context_msg: Option<TwitchMsg>,
     last_time_updated: DateTime<Utc>,
+    paused_messages: Option<Vec<TwitchMsg>>,
+    paused_filtered_messages: Option<Vec<TwitchMsg>>,
 }
 
 impl Default for EguiApp {
@@ -125,6 +127,8 @@ impl Default for EguiApp {
             max_msg_count: super::MAX_MESSAGE_COUNT,
             context_msg: None,
             last_time_updated: Utc::now(),
+            paused_messages: None,
+            paused_filtered_messages: None,
         }
     }
 }
@@ -564,6 +568,38 @@ impl EguiApp {
                                         self.current_channel_mut().unwrap().clear_msg(filtered);
                                     }
 
+                                    let is_paused = if filtered {
+                                        self.paused_filtered_messages.is_some()
+                                    } else {
+                                        self.paused_messages.is_some()
+                                    };
+                                    if ui
+                                        .button(if is_paused { "Resume" } else { "Pause" })
+                                        .clicked()
+                                    {
+                                        if filtered {
+                                            if is_paused {
+                                                self.paused_filtered_messages = None;
+                                            } else {
+                                                self.paused_filtered_messages = Some(
+                                                    self.current_channel()
+                                                        .unwrap()
+                                                        .get_msg(filtered),
+                                                );
+                                            }
+                                        } else {
+                                            if is_paused {
+                                                self.paused_messages = None;
+                                            } else {
+                                                self.paused_messages = Some(
+                                                    self.current_channel()
+                                                        .unwrap()
+                                                        .get_msg(filtered),
+                                                );
+                                            }
+                                        }
+                                    }
+
                                     ui.label(format!(
                                         "{} / {}",
                                         self.current_channel_mut().unwrap().get_msg_count(filtered),
@@ -584,16 +620,32 @@ impl EguiApp {
                                     if home_pressed {
                                         ui.scroll_to_cursor(None);
                                     }
-                                    for msg in self.current_channel().unwrap().get_msg(filtered) {
-                                        if !filtered {
-                                            if let Some(id) = &self.show_msg_id {
-                                                if id == msg.id() {
-                                                    ui.scroll_to_cursor(Some(Align::Center));
-                                                    highlight_message_found = true;
+                                    {
+                                        let messages = if filtered {
+                                            if let Some(p) = self.paused_filtered_messages.as_ref()
+                                            {
+                                                p.clone()
+                                            } else {
+                                                self.current_channel().unwrap().get_msg(filtered)
+                                            }
+                                        } else {
+                                            if let Some(p) = self.paused_messages.as_ref() {
+                                                p.clone()
+                                            } else {
+                                                self.current_channel().unwrap().get_msg(filtered)
+                                            }
+                                        };
+                                        for msg in messages {
+                                            if !filtered {
+                                                if let Some(id) = &self.show_msg_id {
+                                                    if id == msg.id() {
+                                                        ui.scroll_to_cursor(Some(Align::Center));
+                                                        highlight_message_found = true;
+                                                    }
                                                 }
                                             }
+                                            self.draw_msg(ui, &msg);
                                         }
-                                        self.draw_msg(ui, &msg);
                                     }
                                     ui.input(|i| {
                                         if i.pointer.button_clicked(egui::PointerButton::Primary) {
